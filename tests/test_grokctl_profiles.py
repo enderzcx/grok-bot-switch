@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +26,7 @@ from grokctl.models import (  # noqa: E402
     parse_profile,
 )
 from grokctl.profiles import ProfileRegistry  # noqa: E402
-from grokctl.secrets import SecretStore  # noqa: E402
+from grokctl.secrets import MAX_SECRET_BYTES, SecretError, SecretStore  # noqa: E402
 from grokctl.service import GrokctlService  # noqa: E402
 
 
@@ -204,6 +205,18 @@ class ProfileValidationTests(IsolatedHomeTest):
         with self.assertRaises(ValidationError):
             parse_profile({"schemaVersion": 1, "id": "official", "displayName": "官方 Grok"})
 
+    def test_reasoning_effort_literals(self) -> None:
+        for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+            profile = parse_profile(sample_profile(parameters={"reasoningEffort": effort}))
+            self.assertEqual(profile.parameters["reasoningEffort"], effort)
+        with self.assertRaises(ValidationError) as raised:
+            parse_profile(sample_profile(parameters={"reasoningEffort": "ultra"}))
+        message = str(raised.exception)
+        self.assertIn("none", message)
+        self.assertIn("minimal", message)
+        self.assertIn("xhigh", message)
+        self.assertIn("max", message)
+
     def test_fallback_must_be_never(self) -> None:
         with self.assertRaises(ValidationError):
             parse_profile(sample_profile(fallbackPolicy="native"))
@@ -267,16 +280,18 @@ class RegistryTests(IsolatedHomeTest):
         with self.assertRaises(ValidationError):
             registry.load()
 
-    def test_disk_official_is_replaced_by_builtin(self) -> None:
+    def test_save_omits_official_and_rejects_stored_official(self) -> None:
         registry = self.registry()
         registry.add(sample_profile())
         document = json.loads(registry.path.read_text(encoding="utf-8"))
-        document["profiles"]["official"]["displayName"] = "tampered"
+        self.assertNotIn("official", document["profiles"])
+        self.assertIn("custom-openai", document["profiles"])
+        self.assertTrue(registry.get("official").built_in)
+        document["profiles"]["official"] = official_profile().to_canonical_dict()
         registry.path.write_text(json.dumps(document), encoding="utf-8")
         os.chmod(registry.path, 0o600)
-        loaded = registry.get("official")
-        self.assertEqual(loaded.display_name, "官方 Grok")
-        self.assertTrue(loaded.built_in)
+        with self.assertRaises(ValidationError):
+            registry.load()
 
 
 class SecretStoreTests(IsolatedHomeTest):
@@ -331,6 +346,88 @@ class SecretStoreTests(IsolatedHomeTest):
         with self.assertRaises(Exception):
             self.store.set_from_stream("official", _Bytes(self.secret))
 
+    def _secret_dir(self) -> Path:
+        return self.store.path_for("custom-openai").parent
+
+    def _leftovers(self) -> list[str]:
+        parent = self._secret_dir()
+        if not parent.exists():
+            return []
+        names = []
+        for item in parent.iterdir():
+            if item.name.startswith(".secret.") or ".tombstone." in item.name:
+                names.append(item.name)
+        return names
+
+    def test_failed_replace_preserves_previous_secret(self) -> None:
+        first = b"local-test-credential-aaaaaaaa"
+        second = b"local-test-credential-bbbbbbbb"
+        self.store.set_from_stream("custom-openai", _Bytes(first))
+        path = self.store.path_for("custom-openai")
+        before = path.read_bytes()
+        with patch("grokctl.secrets.os.replace", side_effect=OSError("injected replace failure")):
+            with self.assertRaises(SecretError):
+                self.store.set_from_stream("custom-openai", _Bytes(second))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self._leftovers(), [])
+        self.assertNotIn(second.decode("ascii"), path.read_bytes().decode("ascii"))
+
+    def test_failed_write_preserves_previous_secret(self) -> None:
+        first = b"local-test-credential-aaaaaaaa"
+        second = b"local-test-credential-bbbbbbbb"
+        self.store.set_from_stream("custom-openai", _Bytes(first))
+        path = self.store.path_for("custom-openai")
+        before = path.read_bytes()
+        with patch("grokctl.secrets.os.write", side_effect=OSError("injected write failure")):
+            with self.assertRaises(SecretError):
+                self.store.set_from_stream("custom-openai", _Bytes(second))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self._leftovers(), [])
+
+    def test_oversized_stream_rejected_without_echo(self) -> None:
+        huge = b"B" * (MAX_SECRET_BYTES + 1)
+        with self.assertRaises(SecretError) as raised:
+            self.store.set_from_stream("custom-openai", _Bytes(huge))
+        self.assertNotIn(huge[:32].decode("ascii"), str(raised.exception))
+        self.assertFalse(self.store.path_for("custom-openai").exists())
+        self.assertEqual(self._leftovers(), [])
+
+    def test_status_rejects_oversized_and_size_changing_files(self) -> None:
+        path = self.store.path_for("custom-openai")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, b"B" * (MAX_SECRET_BYTES + 1))
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+        oversized = self.store.status("custom-openai", required=True)
+        self.assertTrue(oversized.rejected)
+        self.assertFalse(oversized.installed)
+        self.assertIsNone(oversized.fingerprint_prefix)
+
+        path.unlink()
+        self.store.set_from_stream("custom-openai", _Bytes(self.secret))
+        real_read = os.read
+
+        def growing_read(fd: int, n: int) -> bytes:
+            data = real_read(fd, n)
+            if n == 1 and data == b"":
+                return b"Z"
+            return data
+
+        with patch("grokctl.secrets.os.read", side_effect=growing_read):
+            changed = self.store.status("custom-openai", required=True)
+        self.assertTrue(changed.rejected)
+        self.assertFalse(changed.installed)
+        self.assertIsNone(changed.fingerprint_prefix)
+
+    def test_chunked_stream_installs_complete_secret(self) -> None:
+        status = self.store.set_from_stream("custom-openai", _Chunked(self.secret, size=3))
+        self.assertTrue(status.installed)
+        self.assertEqual(status.byte_count, len(self.secret))
+
 
 class ServiceIsolationTests(IsolatedHomeTest):
     def test_synthetic_home_does_not_touch_default(self) -> None:
@@ -356,13 +453,110 @@ class ServiceIsolationTests(IsolatedHomeTest):
         with self.assertRaises(Exception):
             service.test_profile("custom-openai", live=True)
 
+    def test_remove_provider_restores_secret_if_registry_save_fails(self) -> None:
+        service = self.service()
+        service.add_provider(sample_profile())
+        secret = b"local-test-credential-aaaaaaaa"
+        service.set_secret("custom-openai", _Bytes(secret))
+        path = service.secrets.path_for("custom-openai")
+        before = path.read_bytes()
+        with patch.object(service.registry, "save", side_effect=OSError("injected save failure")):
+            with self.assertRaises(OSError):
+                service.remove_provider("custom-openai")
+        self.assertEqual(service.show_provider("custom-openai")["id"], "custom-openai")
+        self.assertEqual(path.read_bytes(), before)
+        parent = path.parent
+        leftovers = [item.name for item in parent.iterdir() if ".tombstone." in item.name or item.name.startswith(".secret.")]
+        self.assertEqual(leftovers, [])
+        self.assertNotIn(secret.decode("ascii"), json.dumps(service.show_provider("custom-openai")))
+
+    def test_remove_provider_cleans_tombstone_and_missing_secret_is_fine(self) -> None:
+        service = self.service()
+        service.add_provider(sample_profile())
+        service.set_secret("custom-openai", _Bytes(b"local-test-credential-aaaaaaaa"))
+        path = service.secrets.path_for("custom-openai")
+        parent = path.parent
+        result = service.remove_provider("custom-openai")
+        self.assertTrue(result["removed"])
+        self.assertFalse(path.exists())
+        leftovers = [item.name for item in parent.iterdir() if ".tombstone." in item.name or item.name.startswith(".secret.")]
+        self.assertEqual(leftovers, [])
+        service.add_provider(sample_profile(id="no-secret-yet", displayName="No Secret"))
+        removed = service.remove_provider("no-secret-yet")
+        self.assertTrue(removed["removed"])
+
+    def test_remove_provider_rejects_symlink_secret_before_mutation(self) -> None:
+        service = self.service()
+        service.add_provider(sample_profile())
+        path = service.secrets.path_for("custom-openai")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+        outside = Path(self.tmp.name) / "outside-secret"
+        outside.write_bytes(b"local-test-credential-aaaaaaaa")
+        os.symlink(outside, path)
+        with self.assertRaises(SecretError):
+            service.remove_provider("custom-openai")
+        self.assertEqual(service.show_provider("custom-openai")["id"], "custom-openai")
+        self.assertTrue(path.is_symlink())
+
+    def test_activity_rejects_symlink_and_world_readable(self) -> None:
+        service = self.service()
+        service.add_provider(sample_profile())
+        path = service.activity_path
+        self.assertTrue(path.is_file())
+        os.chmod(path, 0o644)
+        with self.assertRaises(ValidationError):
+            service.activity()
+        os.chmod(path, 0o600)
+        payload = path.read_bytes()
+        path.unlink()
+        outside = Path(self.tmp.name) / "outside-activity"
+        outside.write_bytes(payload)
+        os.symlink(outside, path)
+        with self.assertRaises(ValidationError):
+            service.activity()
+        path.unlink()
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, b"{not json\n{\"at\":\"2026-08-30T00:00:00Z\",\"ok\":true,\"type\":\"provider.added\",\"profileId\":\"custom-openai\"}\n")
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+        events = service.activity()["events"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "provider.added")
+
 
 class _Bytes:
     def __init__(self, data: bytes) -> None:
         self._data = data
+        self._offset = 0
 
-    def read(self) -> bytes:
-        return self._data
+    def read(self, size: int = -1) -> bytes:
+        if self._offset >= len(self._data):
+            return b""
+        if size is None or size < 0:
+            size = len(self._data) - self._offset
+        chunk = self._data[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
+
+
+class _Chunked:
+    def __init__(self, data: bytes, size: int = 1) -> None:
+        self._data = data
+        self._offset = 0
+        self._size = size
+
+    def read(self, size: int = -1) -> bytes:
+        if self._offset >= len(self._data):
+            return b""
+        take = self._size
+        if size is not None and size >= 0:
+            take = min(take, size)
+        chunk = self._data[self._offset : self._offset + take]
+        self._offset += len(chunk)
+        return chunk
 
 
 if __name__ == "__main__":

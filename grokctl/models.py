@@ -41,7 +41,7 @@ DNS_HOST_RE = re.compile(
 )
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
-REASONING_EFFORTS = frozenset({"low", "medium", "high"})
+REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 
 FORBIDDEN_FIELDS = frozenset(
     {
@@ -473,7 +473,9 @@ def _parse_parameters(raw: object) -> dict[str, object]:
     if "reasoningEffort" in mapping:
         effort = _require_str(mapping["reasoningEffort"], "reasoningEffort")
         if effort not in REASONING_EFFORTS:
-            raise ValidationError("reasoningEffort 只支持 low、medium、high")
+            raise ValidationError(
+                "reasoningEffort 只支持 none、minimal、low、medium、high、xhigh、max"
+            )
         out["reasoningEffort"] = effort
     if "maxTokens" in mapping:
         tokens = mapping["maxTokens"]

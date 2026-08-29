@@ -106,7 +106,7 @@ class ProfileRegistry:
             if not isinstance(key, str):
                 raise ValidationError("提供方编号必须是文本")
             if key == OFFICIAL_ID:
-                continue
+                raise ValidationError("配置不能包含内置官方通道")
             profile_id = validate_profile_id(key, allow_official=False)
             if profile_id in seen:
                 raise ValidationError("提供方编号重复")
@@ -123,6 +123,7 @@ class ProfileRegistry:
             "profiles": {
                 profile_id: profile.to_canonical_dict()
                 for profile_id, profile in sorted(profiles.items())
+                if profile_id != OFFICIAL_ID and not profile.built_in
             },
         }
         atomic_replace(self.path, pretty_dumps(document).encode("utf-8"), mode=0o600)

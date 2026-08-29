@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Mapping
@@ -116,9 +117,16 @@ class GrokctlService:
 
     def remove_provider(self, profile_id: str) -> dict[str, object]:
         profile = self.registry.get(profile_id)
+        tombstone = None
         if profile.id != OFFICIAL_ID:
-            self.secrets.remove(profile.id)
-        removed = self.registry.remove(profile.id)
+            tombstone = self.secrets.quarantine(profile.id)
+        try:
+            removed = self.registry.remove(profile.id)
+        except Exception:
+            if tombstone is not None:
+                self.secrets.restore(profile.id, tombstone)
+            raise
+        self.secrets.discard_tombstone(tombstone)
         self._append_activity("provider.removed", profile_id=removed.id)
         return {"ok": True, "id": removed.id, "removed": True}
 
@@ -253,19 +261,43 @@ class GrokctlService:
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 1000:
             raise ValidationError("limit 必须是 1 到 1000 的整数")
         events: list[dict[str, object]] = []
-        if self.activity_path.exists():
-            if self.activity_path.is_symlink():
-                raise ValidationError("活动记录文件不能是符号链接")
-            text = self.activity_path.read_text(encoding="utf-8")
-            for line in text.splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    item = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(item, dict):
-                    events.append(item)
+        try:
+            st = os.lstat(self.activity_path)
+        except FileNotFoundError:
+            return {"schemaVersion": SCHEMA_VERSION, "events": []}
+        if stat.S_ISLNK(st.st_mode):
+            raise ValidationError("活动记录文件不能是符号链接")
+        if not stat.S_ISREG(st.st_mode):
+            raise ValidationError("活动记录文件必须是普通文件")
+        if st.st_mode & 0o077:
+            raise ValidationError("活动记录文件权限必须仅限当前用户")
+        try:
+            fd = os.open(str(self.activity_path), os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise ValidationError("活动记录文件不安全") from exc
+        try:
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+        finally:
+            os.close(fd)
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValidationError("活动记录不是有效文本") from exc
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                events.append(item)
         return {"schemaVersion": SCHEMA_VERSION, "events": events[-limit:]}
 
     def ui(self, *, port: int = 0) -> dict[str, object]:
