@@ -93,6 +93,12 @@ def _build_parser() -> _ArgumentParser:
     activity = sub.add_parser("activity", help="查看本地活动")
     activity.add_argument("--limit", type=int, default=50, help="最多返回条数")
 
+    host = sub.add_parser("host", help="配置本机根目录")
+    host_sub = host.add_subparsers(dest="host_command")
+    host_configure = host_sub.add_parser("configure", help="从文件写入本机根目录配置")
+    host_configure.add_argument("--file", required=True, help="主机 JSON 文件")
+    host_sub.add_parser("show", help="查看本机根目录配置")
+
     ui = sub.add_parser("ui", help="打开本地面板")
     ui.add_argument("--port", type=int, default=0, help="监听端口，0 表示自动分配")
     return parser
@@ -120,14 +126,35 @@ def _secret_line(secret: Mapping[str, Any]) -> str:
 
 
 def _format_status(payload: Mapping[str, Any]) -> list[str]:
-    return [
+    host = payload.get("host") or {}
+    lines = [
         "状态",
         f"  主目录: {payload['home']}",
-        f"  当前通道: {payload['desiredProfile']}",
+        f"  目标通道: {payload.get('desiredProfile')}",
         f"  提供方: {payload['providers']}",
         f"  密钥: {payload['secretsInstalled']} 已安装",
-        "  主机: 未接入",
+        f"  回退: {payload.get('fallbackPolicy', 'never')}",
     ]
+    if not host.get("wired"):
+        lines.insert(2, f"  当前通道: {payload.get('desiredProfile')}")
+        lines.append("  主机: 未接入")
+        return lines
+    lines.append(f"  实际通道: {payload.get('observedProfile')}")
+    if payload.get("activeProfile"):
+        lines.append(f"  生效通道: {payload.get('activeProfile')}")
+    lines.append(f"  代数: {payload.get('generation')}")
+    lines.append(f"  主机 PID: {host.get('pid')}")
+    lines.append(f"  启动时间: {host.get('startedAt')}")
+    lines.append(f"  程序校验和: {host.get('bundleDigest')}")
+    lines.append(f"  转发: {host.get('hopHealth')}")
+    lines.append(f"  漂移: {'是' if payload.get('drift') else '否'}")
+    blocking = payload.get("blocking") or []
+    if blocking:
+        lines.append("  阻塞: " + ", ".join(str(item) for item in blocking))
+    receipt = payload.get("lastReceipt") or {}
+    if receipt:
+        lines.append(f"  最近回执: {receipt.get('transactionId')}")
+    return lines
 
 
 def _format_provider_line(item: Mapping[str, Any]) -> str:
@@ -160,11 +187,15 @@ def _format_show(item: Mapping[str, Any]) -> list[str]:
 
 
 def _format_plan(payload: Mapping[str, Any]) -> list[str]:
+    applied = bool(payload.get("apply")) and not bool(payload.get("dryRun"))
+    title = "已应用" if applied else "计划（不会改主机）"
     lines = [
-        "计划（不会改主机）",
+        title,
         f"  动作: {payload.get('action')}",
         f"  目标: {payload.get('target')}",
     ]
+    if payload.get("current"):
+        lines.append(f"  当前: {payload.get('current')}")
     method = payload.get("resolvedMethod")
     endpoint = payload.get("resolvedEndpoint")
     if method and endpoint:
@@ -188,14 +219,32 @@ def _format_plan(payload: Mapping[str, Any]) -> list[str]:
 def _format_test(payload: Mapping[str, Any]) -> list[str]:
     title = "配置校验通过" if payload.get("ok") else "配置校验未通过"
     lines = [title, f"提供方: {payload.get('profileId')}"]
+    if payload.get("protocol"):
+        lines.append(f"协议: {payload['protocol']}")
+    if payload.get("model"):
+        lines.append(f"模型: {payload['model']}")
     method = payload.get("resolvedMethod")
     endpoint = payload.get("resolvedEndpoint")
     if method and endpoint:
         lines.append(f"地址: {method} {endpoint}")
     else:
         lines.append("地址: 本地官方通道")
+    lines.append(f"认证: {payload.get('authType', '-')}")
+    lines.append(f"回退: {payload.get('fallbackPolicy', 'never')}")
     lines.append(f"状态: {payload.get('state')}")
     return lines
+
+
+def _format_host(payload: Mapping[str, Any]) -> list[str]:
+    return [
+        "本机根目录",
+        f"  模式: {payload.get('mode')}",
+        f"  根目录: {payload.get('hostRoot')}",
+        f"  原厂程序: {payload.get('stockBundle')}",
+        f"  已补丁程序: {payload.get('patchedBundle')}",
+        f"  已知原厂校验和: {len(payload.get('knownStockDigests') or [])}",
+        f"  已知补丁校验和: {len(payload.get('knownPatchedDigests') or [])}",
+    ]
 
 
 def _format_activity(payload: Mapping[str, Any]) -> list[str]:
@@ -267,6 +316,20 @@ def _dispatch(service: GrokctlService, args: argparse.Namespace, stdin: Any) -> 
     if command == "activity":
         payload = service.activity(limit=args.limit)
         return payload, _format_activity(payload)
+    if command == "host":
+        action = args.host_command
+        if action == "configure":
+            path = Path(args.file)
+            try:
+                raw = path.read_bytes()
+            except OSError as exc:
+                raise ValidationError("无法读取配置文件") from exc
+            payload = service.configure_host(raw)
+            return payload, ["已配置本机根目录", *_format_host(payload)[1:]]
+        if action == "show":
+            payload = service.show_host()
+            return payload, _format_host(payload)
+        raise ValidationError("请指定 host 子命令")
     if command == "ui":
         service.ui(port=int(args.port))
         raise NotWiredError("本地面板尚未接入")
