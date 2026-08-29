@@ -33,7 +33,8 @@ def main(argv: list[str] | None = None) -> int:
         "AND to_jsonb(tokens)->>(chr(103)||chr(114)||chr(111)||chr(117)||chr(112)) "
         "= (chr(103)||chr(114)||chr(111)||chr(107)) "
         "AND unlimited_quota = false AND remain_quota > 0 "
-        "AND model_limits_enabled = true AND model_limits = 'grok-4.6';"
+        "AND model_limits_enabled = true "
+        "AND model_limits = (chr(103)||chr(114)||chr(111)||chr(107)||chr(45)||chr(52)||chr(46)||chr(54));"
     )
     shell_safe_sql = sql.replace("$", "\\$")
     remote_query = (
