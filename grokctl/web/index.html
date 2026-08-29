@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="csrf-token" content="%%CSRF_TOKEN%%">
+  <title>提供方切换</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">跳到主内容</a>
+  <header class="top">
+    <p class="brand">grokctl</p>
+    <h1>提供方切换</h1>
+    <p class="top-note">仅本机打开。密钥只显示是否已安装。</p>
+  </header>
+
+  <section id="route" class="route" data-state="loading" aria-live="polite" aria-busy="true">
+    <div class="route-head">
+      <p class="route-kicker">当前通道</p>
+      <p id="route-flag" class="route-flag">读取中</p>
+    </div>
+    <h2 id="route-title" class="route-title">正在读取本地状态</h2>
+    <dl class="metrics">
+      <div>
+        <dt>期望</dt>
+        <dd id="metric-desired">读取中</dd>
+      </div>
+      <div>
+        <dt>实际</dt>
+        <dd id="metric-observed">读取中</dd>
+      </div>
+      <div>
+        <dt>模式</dt>
+        <dd id="metric-mode">读取中</dd>
+      </div>
+      <div>
+        <dt>回退</dt>
+        <dd id="metric-fallback">从不</dd>
+      </div>
+    </dl>
+    <p id="route-endpoint" class="endpoint">正在解析实际地址</p>
+    <p id="route-drift" class="route-drift" hidden></p>
+  </section>
+
+  <main id="main">
+    <div class="toolbar">
+      <h2 class="section-title">提供方</h2>
+      <div class="toolbar-actions">
+        <button type="button" id="btn-add">添加提供方</button>
+        <button type="button" id="btn-rollback">回滚</button>
+        <button type="button" id="btn-activity" aria-expanded="false" aria-controls="activity">活动</button>
+      </div>
+    </div>
+
+    <p id="list-status" class="list-status">正在读取提供方列表</p>
+    <div id="providers" class="providers" role="table" aria-label="提供方"></div>
+
+    <section id="review" class="review" hidden>
+      <h2 id="review-title">切换计划</h2>
+      <p id="review-note">现在不会改主机。确认后才会启用。</p>
+      <dl class="metrics">
+        <div>
+          <dt>目标</dt>
+          <dd id="review-target"></dd>
+        </div>
+        <div>
+          <dt>协议</dt>
+          <dd id="review-protocol"></dd>
+        </div>
+        <div>
+          <dt>模型</dt>
+          <dd id="review-model"></dd>
+        </div>
+        <div>
+          <dt>回退</dt>
+          <dd id="review-fallback">从不</dd>
+        </div>
+      </dl>
+      <p class="preview-label">实际地址</p>
+      <p id="review-endpoint" class="endpoint"></p>
+      <p id="review-block" class="banner" hidden></p>
+      <div class="review-actions">
+        <button type="button" id="review-apply" class="primary">启用</button>
+        <button type="button" id="review-cancel">取消</button>
+      </div>
+    </section>
+
+    <section id="test-result" class="review" hidden>
+      <h2>配置测试</h2>
+      <p id="test-summary"></p>
+      <p id="test-endpoint" class="endpoint"></p>
+      <ul id="test-checks"></ul>
+      <p class="live-note">
+        <button type="button" id="btn-live" disabled>在线测试（会消耗额度）</button>
+        <span>尚未接入，不会发送请求。</span>
+      </p>
+    </section>
+
+    <section id="activity" class="activity" hidden>
+      <h2>活动</h2>
+      <p id="activity-status" class="list-status">正在读取活动</p>
+      <ol id="activity-list"></ol>
+    </section>
+  </main>
+
+  <dialog id="add-dialog" aria-labelledby="add-title">
+    <form id="add-form" method="dialog">
+      <h2 id="add-title">添加提供方</h2>
+      <p class="dialog-note">先保存配置，密钥单独写入，提交后输入框会清空。</p>
+      <p id="add-error" class="banner" hidden></p>
+      <div class="fields">
+        <label>编号
+          <input id="field-id" name="id" required autocomplete="off" spellcheck="false" placeholder="custom-openai">
+        </label>
+        <label>显示名称
+          <input id="field-name" name="displayName" required maxlength="80" autocomplete="off" placeholder="Custom OpenAI">
+        </label>
+        <label>协议
+          <select id="field-protocol" name="protocol" required>
+            <option value="openai-chat">openai-chat</option>
+            <option value="openai-responses">openai-responses</option>
+            <option value="anthropic-messages">anthropic-messages</option>
+          </select>
+        </label>
+        <label>根地址
+          <input id="field-base" name="baseUrl" required autocomplete="off" spellcheck="false" placeholder="https://api.example.com/v1">
+        </label>
+        <label>模型
+          <input id="field-model" name="model" required autocomplete="off" spellcheck="false" placeholder="model-name">
+        </label>
+        <label>认证
+          <select id="field-auth" name="auth">
+            <option value="bearer">bearer</option>
+            <option value="x-api-key">x-api-key</option>
+            <option value="none">none</option>
+            <option value="oauth-adapter">oauth-adapter</option>
+          </select>
+        </label>
+        <label id="adapter-wrap" hidden>适配器
+          <input id="field-adapter" name="adapter" autocomplete="off" spellcheck="false">
+        </label>
+        <label>密钥（写入后不会再显示）
+          <input id="field-secret" name="secret" type="password" autocomplete="off" spellcheck="false">
+        </label>
+      </div>
+      <fieldset class="headers">
+        <legend>自定义请求头</legend>
+        <div id="header-rows"></div>
+        <button type="button" id="btn-add-header">添加请求头</button>
+      </fieldset>
+      <details class="advanced">
+        <summary>高级：接口路径</summary>
+        <label>接口路径（可留空使用默认）
+          <input id="field-path" name="endpointPath" autocomplete="off" spellcheck="false" placeholder="/chat/completions">
+        </label>
+      </details>
+      <p class="preview-label">将发送到</p>
+      <p id="add-preview" class="endpoint">填写根地址后显示</p>
+      <div class="dialog-actions">
+        <button type="submit" class="quiet-submit">保存</button>
+        <button type="button" id="btn-add-cancel" value="cancel">取消</button>
+      </div>
+    </form>
+  </dialog>
+
+  <noscript>
+    <p class="banner">本面板需要在浏览器中启用脚本。</p>
+  </noscript>
+  <script src="/app.js"></script>
+</body>
+</html>
