@@ -1,0 +1,9 @@
+runtime/
+sandbox-home/
+__pycache__/
+*.pyc
+research/current-0.30/*.cjs
+research/current-0.30/*.cjs.gz
+vendor/opengrok/
+.grok-companion/
+
