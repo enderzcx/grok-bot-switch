@@ -455,14 +455,14 @@ function collectProviderState(events) {
   return protocol == null ? null : { protocol, items };
 }
 
-function continuationRequest(providerState) {
-  const message = {
-    role: "assistant",
-    content: [
-      { type: "reasoning", text: "plan" },
-      { type: "tool-call", toolCallId: "call_a", toolName: "alpha", args: { a: 1 } }
-    ]
-  };
+function continuationRequest(providerState, options) {
+  options = options || {};
+  const content = [];
+  if (options.omitReasoning !== true) {
+    content.push({ type: "reasoning", text: options.reasoningText == null ? "plan" : options.reasoningText });
+  }
+  content.push({ type: "tool-call", toolCallId: "call_a", toolName: "alpha", args: { a: 1 } });
+  const message = { role: "assistant", content };
   if (providerState !== undefined) {
     message.providerState = providerState;
   }
@@ -601,6 +601,115 @@ test("Anthropic thinking continuation emits and replays signed provider state", 
   );
   assertCode(
     () => decode(adapter, fixture("streams/anthropic-messages/thinking-unsigned.sse")),
+    "unsupported-shape",
+    "anthropic-messages"
+  );
+});
+
+test("providerState is bound to visible assistant reasoning", () => {
+  const responses = protocols.getAdapter("openai-responses");
+  const anthropic = protocols.getAdapter("anthropic-messages");
+  const matchingResponses = {
+    protocol: "openai-responses",
+    items: [{
+      type: "reasoning",
+      id: "rs_1",
+      encrypted_content: "enc_abc",
+      summary: [{ type: "summary_text", text: "plan" }]
+    }]
+  };
+  const matchingAnthropic = {
+    protocol: "anthropic-messages",
+    items: [{ type: "thinking", thinking: "plan", signature: "sig_abc" }]
+  };
+
+  assertCode(
+    () => responses.buildRequest(continuationRequest({
+      protocol: "openai-responses",
+      items: [{
+        type: "reasoning",
+        id: "rs_1",
+        encrypted_content: "enc_abc",
+        summary: [{ type: "summary_text", text: "tampered" }]
+      }]
+    })),
+    "unsupported-shape",
+    "openai-responses"
+  );
+  assertCode(
+    () => responses.buildRequest(continuationRequest({
+      protocol: "openai-responses",
+      items: [{ type: "reasoning", id: "rs_1", encrypted_content: "enc_abc" }]
+    })),
+    "unsupported-shape",
+    "openai-responses"
+  );
+  assertCode(
+    () => responses.buildRequest(continuationRequest({
+      protocol: "openai-responses",
+      items: [{
+        type: "reasoning",
+        id: "rs_1",
+        encrypted_content: "enc_abc",
+        summary: [{ type: "output_text", text: "plan" }]
+      }]
+    })),
+    "unsupported-shape",
+    "openai-responses"
+  );
+  assertCode(
+    () => responses.buildRequest(continuationRequest({
+      protocol: "openai-responses",
+      items: [{
+        type: "reasoning",
+        id: "rs_1",
+        encrypted_content: "enc_abc",
+        summary: [{ type: "summary_text", text: 1 }]
+      }]
+    })),
+    "unsupported-shape",
+    "openai-responses"
+  );
+  assertCode(
+    () => responses.buildRequest(continuationRequest({
+      protocol: "openai-responses",
+      items: [{
+        type: "reasoning",
+        id: "rs_1",
+        encrypted_content: "enc_abc",
+        summary: "plan"
+      }]
+    })),
+    "unsupported-shape",
+    "openai-responses"
+  );
+  assertCode(
+    () => responses.buildRequest(continuationRequest(matchingResponses, { omitReasoning: true })),
+    "unsupported-shape",
+    "openai-responses"
+  );
+
+  assertCode(
+    () => anthropic.buildRequest(continuationRequest({
+      protocol: "anthropic-messages",
+      items: [{ type: "thinking", thinking: "tampered", signature: "sig_abc" }]
+    })),
+    "unsupported-shape",
+    "anthropic-messages"
+  );
+  assertCode(
+    () => anthropic.buildRequest(continuationRequest({
+      protocol: "anthropic-messages",
+      items: [
+        { type: "thinking", thinking: "plan", signature: "sig_abc" },
+        { type: "thinking", thinking: "extra", signature: "sig_extra" }
+      ]
+    })),
+    "unsupported-shape",
+    "anthropic-messages"
+  );
+  assertCode(
+    () => anthropic.buildRequest(continuationRequest(matchingAnthropic, { omitReasoning: true })),
     "unsupported-shape",
     "anthropic-messages"
   );

@@ -80,13 +80,26 @@ function validateAnthropicThinkingItem(item) {
   };
 }
 
+function derivedAnthropicThinkingText(items) {
+  var text = "";
+  for (var i = 0; i < items.length; i += 1) {
+    text += items[i].thinking;
+  }
+  return text;
+}
+
 function assistantContent(message) {
   var payload = tools.extractAssistantPayload(message, PROTOCOL_ID);
   var providerState = contract.requireContinuationState(message, payload, PROTOCOL_ID);
   var content = [];
   if (providerState != null) {
+    var thinkingItems = [];
     for (var i = 0; i < providerState.items.length; i += 1) {
-      content.push(validateAnthropicThinkingItem(providerState.items[i]));
+      thinkingItems.push(validateAnthropicThinkingItem(providerState.items[i]));
+    }
+    contract.assertBoundReasoning(payload.reasoning, derivedAnthropicThinkingText(thinkingItems), PROTOCOL_ID);
+    for (var t = 0; t < thinkingItems.length; t += 1) {
+      content.push(thinkingItems[t]);
     }
   }
   if (payload.text.length > 0) {

@@ -17,6 +17,21 @@ var HOSTED_ITEM_TYPES = {
   local_shell_call: true
 };
 
+function validateSummaryEntries(summary) {
+  if (!Array.isArray(summary)) {
+    throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses reasoning summary is unrepresentable");
+  }
+  var captured = [];
+  for (var i = 0; i < summary.length; i += 1) {
+    var part = summary[i];
+    if (part == null || typeof part !== "object" || Array.isArray(part) || part.type !== "summary_text" || typeof part.text !== "string") {
+      throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses reasoning summary is unrepresentable");
+    }
+    captured.push({ type: "summary_text", text: part.text });
+  }
+  return captured;
+}
+
 function validateResponsesReasoningItem(item) {
   if (item == null || typeof item !== "object" || Array.isArray(item) || item.type !== "reasoning") {
     throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses reasoning item is unrepresentable");
@@ -33,12 +48,23 @@ function validateResponsesReasoningItem(item) {
     encrypted_content: item.encrypted_content
   };
   if (item.summary != null) {
-    if (!Array.isArray(item.summary)) {
-      throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses reasoning summary is unrepresentable");
-    }
-    captured.summary = item.summary;
+    captured.summary = validateSummaryEntries(item.summary);
   }
   return captured;
+}
+
+function derivedResponsesReasoningText(items) {
+  var text = "";
+  for (var i = 0; i < items.length; i += 1) {
+    var summary = items[i].summary;
+    if (!Array.isArray(summary) || summary.length === 0) {
+      continue;
+    }
+    for (var j = 0; j < summary.length; j += 1) {
+      text += summary[j].text;
+    }
+  }
+  return text;
 }
 
 function userMessage(parts) {
@@ -84,8 +110,13 @@ function toResponsesInput(messages) {
       var payload = tools.extractAssistantPayload(message, PROTOCOL_ID);
       var providerState = contract.requireContinuationState(message, payload, PROTOCOL_ID);
       if (providerState != null) {
+        var reasoningItems = [];
         for (var s = 0; s < providerState.items.length; s += 1) {
-          input.push(validateResponsesReasoningItem(providerState.items[s]));
+          reasoningItems.push(validateResponsesReasoningItem(providerState.items[s]));
+        }
+        contract.assertBoundReasoning(payload.reasoning, derivedResponsesReasoningText(reasoningItems), PROTOCOL_ID);
+        for (var r = 0; r < reasoningItems.length; r += 1) {
+          input.push(reasoningItems[r]);
         }
       }
       if (payload.text.length > 0) {

@@ -139,13 +139,31 @@ function readMessageProviderState(message, protocolId) {
 
 function requireContinuationState(message, payload, protocolId) {
   var state = readMessageProviderState(message, protocolId);
-  if (payload != null && typeof payload.reasoning === "string" && payload.reasoning.length > 0 && state == null) {
+  var hasReasoning = payload != null && typeof payload.reasoning === "string" && payload.reasoning.length > 0;
+  if (hasReasoning && state == null) {
     throw protocolError("Reasoning continuation requires providerState", {
       protocol: protocolId,
       code: "unsupported-shape"
     });
   }
+  if (state != null && !hasReasoning) {
+    throw protocolError("providerState requires matching visible reasoning", {
+      protocol: protocolId,
+      code: "unsupported-shape"
+    });
+  }
   return state;
+}
+
+function assertBoundReasoning(visible, derived, protocolId) {
+  var text = visible == null ? "" : String(visible);
+  var bound = derived == null ? "" : String(derived);
+  if (text !== bound) {
+    throw protocolError("providerState does not match visible reasoning", {
+      protocol: protocolId,
+      code: "unsupported-shape"
+    });
+  }
 }
 
 function jsonHeaders(extra, protocolId) {
@@ -434,6 +452,7 @@ module.exports = {
   providerStateEvent: providerStateEvent,
   readMessageProviderState: readMessageProviderState,
   requireContinuationState: requireContinuationState,
+  assertBoundReasoning: assertBoundReasoning,
   jsonHeaders: jsonHeaders,
   mapFinishReason: mapFinishReason,
   normalizeUsage: normalizeUsage,
