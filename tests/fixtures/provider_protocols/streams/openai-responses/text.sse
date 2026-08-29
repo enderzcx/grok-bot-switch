@@ -1,0 +1,20 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","model":"test-model"}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","delta":"plan"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"delta":"hello "}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"delta":"world"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello world"}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"test-model","usage":{"input_tokens":9,"output_tokens":4,"total_tokens":13},"status":"completed"}}

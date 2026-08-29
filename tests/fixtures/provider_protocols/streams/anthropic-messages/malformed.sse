@@ -1,0 +1,5 @@
+event: content_block_delta
+data: {not-json}
+
+event: message_stop
+data: {"type":"message_stop"}

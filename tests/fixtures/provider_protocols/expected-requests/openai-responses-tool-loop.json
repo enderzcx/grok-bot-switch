@@ -1,0 +1,49 @@
+{
+  "method": "POST",
+  "path": "/responses",
+  "headers": {
+    "content-type": "application/json",
+    "accept": "text/event-stream"
+  },
+  "body": {
+    "model": "test-model",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [{ "type": "input_text", "text": "Look up the weather." }]
+      },
+      {
+        "type": "message",
+        "role": "assistant",
+        "content": [{ "type": "output_text", "text": "checking" }]
+      },
+      {
+        "type": "function_call",
+        "call_id": "call_abc",
+        "name": "lookup",
+        "arguments": "{\"q\":\"weather\"}"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_abc",
+        "output": "{\"temp\":18}"
+      }
+    ],
+    "stream": true,
+    "instructions": "You are a helper.",
+    "tools": [
+      {
+        "type": "function",
+        "name": "lookup",
+        "description": "Look something up",
+        "parameters": {
+          "type": "object",
+          "properties": { "q": { "type": "string" } },
+          "required": ["q"]
+        }
+      }
+    ],
+    "max_output_tokens": 128
+  }
+}

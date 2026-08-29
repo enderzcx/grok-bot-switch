@@ -1,0 +1,32 @@
+{
+  "model": "test-model",
+  "messages": [
+    { "role": "system", "content": "You are a helper." },
+    { "role": "user", "content": "Look up the weather." },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "text", "text": "checking" },
+        { "type": "tool-call", "toolCallId": "call_abc", "toolName": "lookup", "args": { "q": "weather" } }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": [
+        { "type": "tool-result", "toolCallId": "call_abc", "toolName": "lookup", "result": { "temp": 18 } }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "lookup",
+      "description": "Look something up",
+      "parameters": {
+        "type": "object",
+        "properties": { "q": { "type": "string" } },
+        "required": ["q"]
+      }
+    }
+  ],
+  "maxTokens": 128
+}

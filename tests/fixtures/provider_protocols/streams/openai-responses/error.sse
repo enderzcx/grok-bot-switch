@@ -1,0 +1,2 @@
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_bad","status":"failed","error":{"message":"upstream overloaded"}}}

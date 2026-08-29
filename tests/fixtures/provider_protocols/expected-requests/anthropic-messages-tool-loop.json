@@ -1,0 +1,42 @@
+{
+  "method": "POST",
+  "path": "/messages",
+  "headers": {
+    "content-type": "application/json",
+    "accept": "text/event-stream",
+    "anthropic-version": "2023-06-01"
+  },
+  "body": {
+    "model": "test-model",
+    "messages": [
+      { "role": "user", "content": "Look up the weather." },
+      {
+        "role": "assistant",
+        "content": [
+          { "type": "text", "text": "checking" },
+          { "type": "tool_use", "id": "call_abc", "name": "lookup", "input": { "q": "weather" } }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          { "type": "tool_result", "tool_use_id": "call_abc", "content": "{\"temp\":18}" }
+        ]
+      }
+    ],
+    "max_tokens": 128,
+    "stream": true,
+    "system": "You are a helper.",
+    "tools": [
+      {
+        "name": "lookup",
+        "description": "Look something up",
+        "input_schema": {
+          "type": "object",
+          "properties": { "q": { "type": "string" } },
+          "required": ["q"]
+        }
+      }
+    ]
+  }
+}

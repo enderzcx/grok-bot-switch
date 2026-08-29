@@ -1,0 +1,5 @@
+event: response.output_text.delta
+data: {not-json}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}

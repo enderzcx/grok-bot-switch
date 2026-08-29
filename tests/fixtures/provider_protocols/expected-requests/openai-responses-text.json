@@ -1,0 +1,21 @@
+{
+  "method": "POST",
+  "path": "/responses",
+  "headers": {
+    "content-type": "application/json",
+    "accept": "text/event-stream"
+  },
+  "body": {
+    "model": "test-model",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [{ "type": "input_text", "text": "Say hello." }]
+      }
+    ],
+    "stream": true,
+    "instructions": "You are a helper.",
+    "max_output_tokens": 128
+  }
+}

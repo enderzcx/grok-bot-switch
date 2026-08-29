@@ -1,0 +1,8 @@
+{
+  "model": "test-model",
+  "messages": [
+    { "role": "system", "content": "You are a helper." },
+    { "role": "user", "content": "Say hello." }
+  ],
+  "maxTokens": 128
+}

@@ -1,0 +1,18 @@
+{
+  "method": "POST",
+  "path": "/chat/completions",
+  "headers": {
+    "content-type": "application/json",
+    "accept": "text/event-stream"
+  },
+  "body": {
+    "model": "test-model",
+    "messages": [
+      { "role": "system", "content": "You are a helper." },
+      { "role": "user", "content": "Say hello." }
+    ],
+    "stream": true,
+    "stream_options": { "include_usage": true },
+    "max_tokens": 128
+  }
+}

@@ -1,0 +1,7 @@
+data: {"id":"chatcmpl-1","model":"test-model","choices":[{"index":0,"delta":{"reasoning_content":"plan"}}]}
+
+data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"hello "}}]}
+
+data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}
+
+data: [DONE]
