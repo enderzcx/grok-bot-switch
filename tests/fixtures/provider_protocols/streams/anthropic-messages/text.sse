@@ -7,6 +7,9 @@ data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"
 event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan"}}
 
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_text"}}
+
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}
 

@@ -63,20 +63,41 @@ function appendUser(messages, content) {
   messages.push({ role: "user", content: parts });
 }
 
-function assistantContent(payload) {
+function validateAnthropicThinkingItem(item) {
+  if (item == null || typeof item !== "object" || Array.isArray(item) || item.type !== "thinking") {
+    throw tools.unsupported(PROTOCOL_ID, "Anthropic thinking item is unrepresentable");
+  }
+  if (typeof item.thinking !== "string") {
+    throw tools.unsupported(PROTOCOL_ID, "Anthropic thinking item is unrepresentable");
+  }
+  if (typeof item.signature !== "string" || item.signature.length === 0) {
+    throw tools.unsupported(PROTOCOL_ID, "Anthropic thinking continuation requires a signature");
+  }
+  return {
+    type: "thinking",
+    thinking: item.thinking,
+    signature: item.signature
+  };
+}
+
+function assistantContent(message) {
+  var payload = tools.extractAssistantPayload(message, PROTOCOL_ID);
+  var providerState = contract.requireContinuationState(message, payload, PROTOCOL_ID);
   var content = [];
-  if (payload.reasoning.length > 0) {
-    content.push({ type: "thinking", thinking: payload.reasoning });
+  if (providerState != null) {
+    for (var i = 0; i < providerState.items.length; i += 1) {
+      content.push(validateAnthropicThinkingItem(providerState.items[i]));
+    }
   }
   if (payload.text.length > 0) {
     content.push({ type: "text", text: payload.text });
   }
-  for (var i = 0; i < payload.toolCalls.length; i += 1) {
+  for (var t = 0; t < payload.toolCalls.length; t += 1) {
     content.push({
       type: "tool_use",
-      id: payload.toolCalls[i].id,
-      name: payload.toolCalls[i].name,
-      input: tools.parseToolArgumentsObject(payload.toolCalls[i].arguments, PROTOCOL_ID)
+      id: payload.toolCalls[t].id,
+      name: payload.toolCalls[t].name,
+      input: tools.parseToolArgumentsObject(payload.toolCalls[t].arguments, PROTOCOL_ID)
     });
   }
   if (content.length === 0) {
@@ -107,7 +128,7 @@ function toAnthropicMessages(messages) {
     } else if (role === "assistant") {
       out.push({
         role: "assistant",
-        content: assistantContent(tools.extractAssistantPayload(message, PROTOCOL_ID))
+        content: assistantContent(message)
       });
     } else if (role === "tool") {
       var results = tools.extractToolResults(message, PROTOCOL_ID);
@@ -200,6 +221,8 @@ function createBlock(index) {
     name: "",
     arguments: "",
     pendingDeltas: "",
+    thinking: "",
+    signature: "",
     started: false,
     finalized: false
   };
@@ -393,7 +416,11 @@ function startBlock(state, payload, events) {
   if (block.type === "thinking") {
     current.kind = "reasoning";
     if (typeof block.thinking === "string" && block.thinking.length > 0) {
+      current.thinking += block.thinking;
       events.push({ type: "reasoning", textDelta: block.thinking });
+    }
+    if (typeof block.signature === "string" && block.signature.length > 0) {
+      current.signature += block.signature;
     }
     return;
   }
@@ -434,12 +461,19 @@ function deltaBlock(state, payload, events) {
     if (typeof delta.thinking !== "string") {
       throw tools.unsupported(PROTOCOL_ID, "Anthropic thinking delta is unrepresentable");
     }
+    current.kind = "reasoning";
+    current.thinking += delta.thinking;
     if (delta.thinking.length > 0) {
       events.push({ type: "reasoning", textDelta: delta.thinking });
     }
     return;
   }
   if (delta.type === "signature_delta") {
+    if (typeof delta.signature !== "string") {
+      throw tools.unsupported(PROTOCOL_ID, "Anthropic thinking signature is unrepresentable");
+    }
+    current.kind = "reasoning";
+    current.signature += delta.signature;
     return;
   }
   if (delta.type === "input_json_delta") {
@@ -495,6 +529,15 @@ function handlePayload(raw, payload, state) {
     var current = state.slot(payload.index);
     if (current.kind === "tool") {
       state.finalizeTool(current, events);
+    } else if (current.kind === "reasoning") {
+      if (typeof current.signature !== "string" || current.signature.length === 0) {
+        throw tools.unsupported(PROTOCOL_ID, "Anthropic thinking block is missing a signature");
+      }
+      events.push(contract.providerStateEvent(PROTOCOL_ID, [{
+        type: "thinking",
+        thinking: current.thinking,
+        signature: current.signature
+      }]));
     }
     return events;
   }

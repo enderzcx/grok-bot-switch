@@ -176,11 +176,29 @@ test("endpointPath override stays visible and path-only", () => {
   const request = readJson(join(FIXTURES, "requests", "text.json"));
   const chat = protocols.getAdapter("openai-chat").buildRequest(request, { endpointPath: "/custom/chat" });
   assert.equal(chat.path, "/custom/chat");
-  assertCode(
-    () => protocols.getAdapter("openai-chat").buildRequest(request, { endpointPath: "https://example.test/v1/chat" }),
-    "invalid-request",
-    "openai-chat"
-  );
+  const nested = protocols.getAdapter("openai-chat").buildRequest(request, { endpointPath: "/v1/custom/chat" });
+  assert.equal(nested.path, "/v1/custom/chat");
+  const rejected = [
+    "https://example.test/v1/chat",
+    "//chat",
+    "chat",
+    "/foo?x=1",
+    "/foo#frag",
+    "/foo\\bar",
+    "/foo bar",
+    "/foo\tbar",
+    "/foo\nbar",
+    "/foo\rbar",
+    "/foo\u0000bar",
+    "/foo\u007fbar"
+  ];
+  for (const endpointPath of rejected) {
+    assertCode(
+      () => protocols.getAdapter("openai-chat").buildRequest(request, { endpointPath }),
+      "invalid-request",
+      "openai-chat"
+    );
+  }
 });
 
 test("equivalent text + reasoning + usage semantics survive fragmentation and CRLF", () => {
@@ -421,6 +439,171 @@ test("OpenAI Chat SSE joins split data lines and ignores comments", () => {
   ].join("");
   const events = decode(protocols.getAdapter("openai-chat"), stream, 1);
   assert.equal(semantics(events).text, "你好");
+});
+
+function collectProviderState(events) {
+  const items = [];
+  let protocol = null;
+  for (const event of events) {
+    if (event.type !== "provider-state") continue;
+    assert.equal(typeof event.protocol, "string");
+    assert.equal(event.state.protocol, event.protocol);
+    assert.ok(Array.isArray(event.state.items));
+    protocol = event.protocol;
+    items.push(...event.state.items);
+  }
+  return protocol == null ? null : { protocol, items };
+}
+
+function continuationRequest(providerState) {
+  const message = {
+    role: "assistant",
+    content: [
+      { type: "reasoning", text: "plan" },
+      { type: "tool-call", toolCallId: "call_a", toolName: "alpha", args: { a: 1 } }
+    ]
+  };
+  if (providerState !== undefined) {
+    message.providerState = providerState;
+  }
+  return {
+    model: "test-model",
+    maxTokens: 128,
+    tools: [{ name: "alpha", parameters: { type: "object", properties: { a: { type: "number" } } } }],
+    messages: [
+      { role: "user", content: "Look up the weather." },
+      message,
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "call_a", toolName: "alpha", result: { ok: true } }]
+      }
+    ]
+  };
+}
+
+test("OpenAI Responses reasoning continuation emits and replays opaque provider state", () => {
+  const adapter = protocols.getAdapter("openai-responses");
+  const events = decode(adapter, fixture("streams/openai-responses/reasoning-tools.sse"));
+  const summary = semantics(events);
+  assert.equal(summary.reasoning, "plan");
+  assert.deepEqual(summary.toolCalls, [{ id: "call_a", name: "alpha", args: { a: 1 } }]);
+  const state = collectProviderState(events);
+  assert.deepEqual(state, {
+    protocol: "openai-responses",
+    items: [{
+      type: "reasoning",
+      id: "rs_1",
+      encrypted_content: "enc_abc",
+      summary: [{ type: "summary_text", text: "plan" }]
+    }]
+  });
+
+  const built = adapter.buildRequest(continuationRequest(state));
+  assert.equal(built.body.store, false);
+  assert.deepEqual(built.body.include, ["reasoning.encrypted_content"]);
+  assert.deepEqual(built.body.input[1], state.items[0]);
+  assert.equal(built.body.input[2].type, "function_call");
+  assert.equal(built.body.input[2].call_id, "call_a");
+  assert.deepEqual(built.body.input[3], {
+    type: "function_call_output",
+    call_id: "call_a",
+    output: "{\"ok\":true}"
+  });
+
+  const ordinary = adapter.buildRequest(readJson(join(FIXTURES, "requests", "text.json")));
+  assert.equal(ordinary.body.store, false);
+  assert.deepEqual(ordinary.body.include, ["reasoning.encrypted_content"]);
+  assert.equal(ordinary.body.input.some((item) => item.type === "reasoning"), false);
+
+  assertCode(() => adapter.buildRequest(continuationRequest(undefined)), "unsupported-shape", "openai-responses");
+  assertCode(
+    () => adapter.buildRequest(continuationRequest({ protocol: "openai-responses", items: [{ type: "reasoning", id: "rs_1" }] })),
+    "unsupported-shape",
+    "openai-responses"
+  );
+  assertCode(
+    () => adapter.buildRequest(continuationRequest({
+      protocol: "openai-responses",
+      items: [{ type: "reasoning", id: "rs_1", encrypted_content: "" }]
+    })),
+    "unsupported-shape",
+    "openai-responses"
+  );
+  assertCode(
+    () => adapter.buildRequest(continuationRequest({
+      protocol: "anthropic-messages",
+      items: state.items
+    })),
+    "unsupported-shape",
+    "openai-responses"
+  );
+  assertCode(
+    () => decode(adapter, fixture("streams/openai-responses/reasoning-unsigned.sse")),
+    "unsupported-shape",
+    "openai-responses"
+  );
+});
+
+test("Anthropic thinking continuation emits and replays signed provider state", () => {
+  const adapter = protocols.getAdapter("anthropic-messages");
+  const events = decode(adapter, fixture("streams/anthropic-messages/reasoning-tools.sse"));
+  const summary = semantics(events);
+  assert.equal(summary.reasoning, "plan");
+  assert.deepEqual(summary.toolCalls, [{ id: "call_a", name: "alpha", args: { a: 1 } }]);
+  const state = collectProviderState(events);
+  assert.deepEqual(state, {
+    protocol: "anthropic-messages",
+    items: [{ type: "thinking", thinking: "plan", signature: "sig_abc" }]
+  });
+
+  const built = adapter.buildRequest(continuationRequest(state));
+  assert.deepEqual(built.body.messages[1].content[0], state.items[0]);
+  assert.deepEqual(built.body.messages[1].content[1], {
+    type: "tool_use",
+    id: "call_a",
+    name: "alpha",
+    input: { a: 1 }
+  });
+  assert.deepEqual(built.body.messages[2].content, [{
+    type: "tool_result",
+    tool_use_id: "call_a",
+    content: "{\"ok\":true}"
+  }]);
+
+  const ordinary = adapter.buildRequest(readJson(join(FIXTURES, "requests", "tool-loop.json")));
+  assert.equal(JSON.stringify(ordinary.body.messages).includes("thinking"), false);
+  assert.equal(JSON.stringify(ordinary.body.messages).includes("signature"), false);
+
+  assertCode(() => adapter.buildRequest(continuationRequest(undefined)), "unsupported-shape", "anthropic-messages");
+  assertCode(
+    () => adapter.buildRequest(continuationRequest({
+      protocol: "anthropic-messages",
+      items: [{ type: "thinking", thinking: "plan" }]
+    })),
+    "unsupported-shape",
+    "anthropic-messages"
+  );
+  assertCode(
+    () => adapter.buildRequest(continuationRequest({
+      protocol: "anthropic-messages",
+      items: [{ type: "thinking", thinking: "plan", signature: "" }]
+    })),
+    "unsupported-shape",
+    "anthropic-messages"
+  );
+  assertCode(
+    () => adapter.buildRequest(continuationRequest({
+      protocol: "openai-responses",
+      items: state.items
+    })),
+    "unsupported-shape",
+    "anthropic-messages"
+  );
+  assertCode(
+    () => decode(adapter, fixture("streams/anthropic-messages/thinking-unsigned.sse")),
+    "unsupported-shape",
+    "anthropic-messages"
+  );
 });
 
 test("fragmented multibyte text is reconstructed", () => {

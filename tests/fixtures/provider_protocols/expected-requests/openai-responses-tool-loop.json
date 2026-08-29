@@ -31,6 +31,8 @@
       }
     ],
     "stream": true,
+    "store": false,
+    "include": ["reasoning.encrypted_content"],
     "instructions": "You are a helper.",
     "tools": [
       {

@@ -17,6 +17,30 @@ var HOSTED_ITEM_TYPES = {
   local_shell_call: true
 };
 
+function validateResponsesReasoningItem(item) {
+  if (item == null || typeof item !== "object" || Array.isArray(item) || item.type !== "reasoning") {
+    throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses reasoning item is unrepresentable");
+  }
+  if (typeof item.id !== "string" || item.id.length === 0) {
+    throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses reasoning item is missing id");
+  }
+  if (typeof item.encrypted_content !== "string" || item.encrypted_content.length === 0) {
+    throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses reasoning item is missing encrypted_content");
+  }
+  var captured = {
+    type: "reasoning",
+    id: item.id,
+    encrypted_content: item.encrypted_content
+  };
+  if (item.summary != null) {
+    if (!Array.isArray(item.summary)) {
+      throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses reasoning summary is unrepresentable");
+    }
+    captured.summary = item.summary;
+  }
+  return captured;
+}
+
 function userMessage(parts) {
   var content = [];
   for (var i = 0; i < parts.length; i += 1) {
@@ -58,11 +82,11 @@ function toResponsesInput(messages) {
       input.push(userMessage(tools.extractUserParts(message, PROTOCOL_ID)));
     } else if (role === "assistant") {
       var payload = tools.extractAssistantPayload(message, PROTOCOL_ID);
-      if (payload.reasoning.length > 0) {
-        input.push({
-          type: "reasoning",
-          summary: [{ type: "summary_text", text: payload.reasoning }]
-        });
+      var providerState = contract.requireContinuationState(message, payload, PROTOCOL_ID);
+      if (providerState != null) {
+        for (var s = 0; s < providerState.items.length; s += 1) {
+          input.push(validateResponsesReasoningItem(providerState.items[s]));
+        }
       }
       if (payload.text.length > 0) {
         input.push(assistantTextMessage(payload.text));
@@ -118,7 +142,9 @@ function buildRequest(request, options) {
   var body = {
     model: request.model,
     input: mapped.input,
-    stream: true
+    stream: true,
+    store: false,
+    include: ["reasoning.encrypted_content"]
   };
   if (mapped.instructions != null) {
     body.instructions = mapped.instructions;
@@ -365,15 +391,17 @@ function handleOutputItem(state, item, outputIndex, events, finalize) {
     current.kind = current.kind || "message";
     return;
   }
-  if (item.type === "reasoning" || item.type === "reasoning_summary") {
+  if (item.type === "reasoning") {
     current.kind = "reasoning";
-    if (finalize && !current.reasoningEmitted) {
-      var summaryText = reasoningSummaryText(item);
-      if (summaryText.length > 0) {
-        events.push({ type: "reasoning", textDelta: summaryText });
-        current.reasoningEmitted = true;
-      }
+    if (!finalize) {
+      return;
     }
+    var summaryText = reasoningSummaryText(item);
+    if (summaryText.length > 0 && !current.reasoningEmitted) {
+      events.push({ type: "reasoning", textDelta: summaryText });
+      current.reasoningEmitted = true;
+    }
+    events.push(contract.providerStateEvent(PROTOCOL_ID, [validateResponsesReasoningItem(item)]));
     return;
   }
   throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses output item is unrepresentable");

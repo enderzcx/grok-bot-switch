@@ -68,15 +68,84 @@ function assertNormalizedRequest(request, protocolId) {
   }
 }
 
+function isSafeAbsolutePath(path) {
+  if (typeof path !== "string" || path.length === 0) {
+    return false;
+  }
+  if (path.charCodeAt(0) !== 47 || (path.length > 1 && path.charCodeAt(1) === 47)) {
+    return false;
+  }
+  for (var i = 0; i < path.length; i += 1) {
+    var code = path.charCodeAt(i);
+    if (code < 32 || code === 32 || code === 92 || code === 63 || code === 35 || code === 127) {
+      return false;
+    }
+  }
+  if (path.indexOf("://") !== -1) {
+    return false;
+  }
+  return true;
+}
+
 function resolveEndpointPath(defaultPath, options, protocolId) {
   if (options == null || options.endpointPath == null || options.endpointPath === "") {
     return defaultPath;
   }
-  var path = String(options.endpointPath);
-  if (path.charAt(0) !== "/" || path.indexOf("://") !== -1 || path.indexOf("?") !== -1 || path.indexOf("#") !== -1 || path.indexOf(" ") !== -1) {
+  if (typeof options.endpointPath !== "string" || !isSafeAbsolutePath(options.endpointPath)) {
     throw protocolError("endpointPath must be an absolute path", { protocol: protocolId, code: "invalid-request" });
   }
-  return path;
+  return options.endpointPath;
+}
+
+function providerStateEvent(protocolId, items) {
+  return {
+    type: "provider-state",
+    protocol: protocolId,
+    state: {
+      protocol: protocolId,
+      items: items
+    }
+  };
+}
+
+function readMessageProviderState(message, protocolId) {
+  if (message == null || message.providerState == null) {
+    return null;
+  }
+  var state = message.providerState;
+  if (typeof state !== "object" || Array.isArray(state)) {
+    throw protocolError("providerState is unrepresentable", {
+      protocol: protocolId,
+      code: "unsupported-shape"
+    });
+  }
+  if (state.protocol !== protocolId) {
+    throw protocolError("providerState protocol does not match adapter", {
+      protocol: protocolId,
+      code: "unsupported-shape"
+    });
+  }
+  if (!Array.isArray(state.items)) {
+    throw protocolError("providerState items must be an array", {
+      protocol: protocolId,
+      code: "unsupported-shape"
+    });
+  }
+  if (state.items.length === 0) {
+    return null;
+  }
+  return state;
+}
+
+function requireContinuationState(message, payload, protocolId) {
+  var state = readMessageProviderState(message, protocolId);
+  if (payload != null && typeof payload.reasoning === "string" && payload.reasoning.length > 0 && state == null) {
+    throw protocolError("Reasoning continuation requires providerState", {
+      protocol: protocolId,
+      code: "unsupported-shape"
+    });
+  }
+  return state;
 }
 
 function jsonHeaders(extra, protocolId) {
@@ -362,6 +431,9 @@ module.exports = {
   assertProtocolId: assertProtocolId,
   assertNormalizedRequest: assertNormalizedRequest,
   resolveEndpointPath: resolveEndpointPath,
+  providerStateEvent: providerStateEvent,
+  readMessageProviderState: readMessageProviderState,
+  requireContinuationState: requireContinuationState,
   jsonHeaders: jsonHeaders,
   mapFinishReason: mapFinishReason,
   normalizeUsage: normalizeUsage,
