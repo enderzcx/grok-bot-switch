@@ -12,22 +12,28 @@ from typing import Any, BinaryIO, Mapping, Optional
 from grokctl.integration import (
     ExclusiveLock,
     HostConfig,
+    RUNTIME_KIND_LAB_SYNTHETIC,
     SecretAwareRuntime,
     build_host_runtime,
     build_switch_engine,
     collect_blockers,
+    lab_runtime_fields,
     load_host_config,
     parse_host_config,
+    public_switch_code,
     public_receipt,
     raise_switch_error,
+    referenced_profile_ids,
     save_host_config,
     status_from_host,
     switch_message,
-    verified_rollback_target,
+    verified_switch_back_target,
 )
 from grokctl.models import (
     OFFICIAL_ID,
     SCHEMA_VERSION,
+    ConflictError,
+    GrokctlError,
     NotWiredError,
     ProviderProfile,
     SecretError,
@@ -120,13 +126,17 @@ class GrokctlService:
             config = parse_host_config(raw)
             saved = save_host_config(self.home, config)
             self._append_activity("host.configured", extra={"mode": saved.mode, "hostRoot": str(saved.host_root)})
-            return saved.to_canonical_dict()
+            payload = saved.to_canonical_dict()
+            payload.update(lab_runtime_fields(saved))
+            return payload
 
     def show_host(self) -> dict[str, object]:
         config = load_host_config(self.home)
         if config is None:
             raise NotWiredError("尚未配置本机根目录")
-        return config.to_canonical_dict()
+        payload = config.to_canonical_dict()
+        payload.update(lab_runtime_fields(config))
+        return payload
 
     def status(self) -> dict[str, object]:
         profiles = self.registry.list_profiles()
@@ -164,6 +174,9 @@ class GrokctlService:
     def remove_provider(self, profile_id: str) -> dict[str, object]:
         with self._lock.holding():
             profile = self.registry.get(profile_id)
+            _config, runtime = self._host()
+            if profile.id in referenced_profile_ids(runtime):
+                raise ConflictError("该提供方正在使用，不能删除")
             tombstone = None
             if profile.id != OFFICIAL_ID:
                 tombstone = self.secrets.quarantine(profile.id)
@@ -277,6 +290,7 @@ class GrokctlService:
             "wired": wired,
             "blocking": blocking,
             "liveVerified": False,
+            "runtimeKind": RUNTIME_KIND_LAB_SYNTHETIC if wired else None,
         }
 
     def _merge_engine_plan(self, payload: dict[str, object], plan: ActivationPlan) -> dict[str, object]:
@@ -329,6 +343,7 @@ class GrokctlService:
             blocking=blocking,
             wired=wired,
         )
+        payload.update(lab_runtime_fields(config))
         if wired and not blocking:
             try:
                 engine_plan = self._engine(config, runtime).plan(profile.id)
@@ -353,6 +368,8 @@ class GrokctlService:
         config, runtime = self._host()
         if config is None or runtime is None:
             raise NotWiredError("尚未配置本机根目录")
+        if not config.allow_synthetic_apply:
+            raise GrokctlError(switch_message("lab-runtime"), code="lab-runtime")
         current = runtime.observe().profile_id
         blocking = collect_blockers(
             profile_id=profile.id,
@@ -384,6 +401,7 @@ class GrokctlService:
         payload["apply"] = True
         payload["hostMutation"] = True
         payload["receipt"] = public_receipt(receipt.to_dict())
+        payload.update(lab_runtime_fields(config))
         payload["liveVerified"] = False
         self._append_activity(
             "switch.applied",
@@ -450,30 +468,37 @@ class GrokctlService:
         return result
 
     def rollback(self, *, apply: bool = False) -> dict[str, object]:
+        return self.switch_back(apply=apply)
+
+    def switch_back(self, *, apply: bool = False) -> dict[str, object]:
         if apply:
             with self._lock.holding():
-                return self._rollback_locked(apply=True)
-        return self._rollback_locked(apply=False)
+                return self._switch_back_locked(apply=True)
+        return self._switch_back_locked(apply=False)
 
-    def _rollback_locked(self, *, apply: bool) -> dict[str, object]:
+    def _switch_back_locked(self, *, apply: bool) -> dict[str, object]:
         config, runtime = self._host()
         if config is None or runtime is None:
             payload = {
                 "schemaVersion": SCHEMA_VERSION,
                 "dryRun": not apply,
                 "apply": apply,
-                "action": "rollback",
+                "action": "switch-back",
                 "target": OFFICIAL_ID,
                 "snapshot": False,
                 "hostMutation": False,
                 "wired": False,
                 "blocking": ["not-wired"],
                 "liveVerified": False,
+                "exactRestore": False,
             }
+            payload.update(lab_runtime_fields(None))
             if apply:
                 raise NotWiredError("尚未配置本机根目录")
-            self._append_activity("plan.generated", profile_id=OFFICIAL_ID, extra={"action": "rollback"})
+            self._append_activity("plan.generated", profile_id=OFFICIAL_ID, extra={"action": "switch-back"})
             return payload
+        if apply and not config.allow_synthetic_apply:
+            raise GrokctlError(switch_message("lab-runtime"), code="lab-runtime")
         blocking = collect_blockers(
             profile_id=OFFICIAL_ID,
             secret_installed=True,
@@ -483,22 +508,26 @@ class GrokctlService:
             runtime=runtime,
             config=config,
             require_receipt=True,
+            registry=self.registry,
         )
         target_id = None
         receipt = None
+        verify_error: GrokctlError | None = None
         try:
-            target_id, receipt = verified_rollback_target(runtime)
-            blocking = [item for item in blocking if item != "missing-receipt"]
-        except Exception:
-            if "missing-receipt" not in blocking:
-                blocking.append("missing-receipt")
+            target_id, receipt = verified_switch_back_target(runtime, self.registry)
+            blocking = [item for item in blocking if item not in {"missing-receipt", "snapshot-mismatch"}]
+        except GrokctlError as exc:
+            verify_error = exc
+            code = public_switch_code(exc.code)
+            if code not in blocking:
+                blocking.append(code)
         current = runtime.observe().profile_id
         if target_id is None:
             payload = {
                 "schemaVersion": SCHEMA_VERSION,
                 "dryRun": not apply,
                 "apply": apply,
-                "action": "rollback",
+                "action": "switch-back",
                 "target": None,
                 "current": current,
                 "snapshot": False,
@@ -507,10 +536,14 @@ class GrokctlService:
                 "blocking": blocking,
                 "liveVerified": False,
                 "fallbackPolicy": "never",
+                "exactRestore": False,
             }
+            payload.update(lab_runtime_fields(config))
             if apply:
-                raise ValidationError("无法回滚：" + switch_message("missing-receipt"))
-            self._append_activity("plan.generated", extra={"action": "rollback"})
+                if verify_error is not None:
+                    raise verify_error
+                raise ValidationError("无法切回：" + "、".join(switch_message(item) for item in blocking))
+            self._append_activity("plan.generated", extra={"action": "switch-back"})
             return payload
         profile = self._profile(target_id)
         secret = self._secret_for(profile)
@@ -528,19 +561,21 @@ class GrokctlService:
                 blocking.append(item)
         payload = self._base_plan(
             profile,
-            action="rollback",
+            action="switch-back",
             apply=apply,
             current=current,
             blocking=blocking,
             wired=True,
         )
+        payload.update(lab_runtime_fields(config))
         payload["snapshot"] = True
+        payload["exactRestore"] = False
         payload["previousReceipt"] = public_receipt(receipt)
         if not apply:
-            self._append_activity("plan.generated", profile_id=profile.id, extra={"action": "rollback"})
+            self._append_activity("plan.generated", profile_id=profile.id, extra={"action": "switch-back"})
             return payload
         if blocking:
-            raise ValidationError("无法回滚：" + "、".join(switch_message(item) for item in blocking))
+            raise ValidationError("无法切回：" + "、".join(switch_message(item) for item in blocking))
         engine = self._engine(config, runtime)
         try:
             engine_plan = engine.plan(profile.id)
@@ -553,9 +588,11 @@ class GrokctlService:
         payload["hostMutation"] = True
         payload["blocking"] = []
         payload["receipt"] = public_receipt(applied.to_dict())
+        payload.update(lab_runtime_fields(config))
         payload["liveVerified"] = False
+        payload["exactRestore"] = False
         self._append_activity(
-            "switch.rolled_back",
+            "switch.switched_back",
             profile_id=profile.id,
             extra={
                 "transactionId": applied.transaction_id,

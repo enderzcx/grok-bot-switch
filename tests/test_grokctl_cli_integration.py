@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI integration tests for grokctl local-root host wiring."""
+"""CLI integration tests for grokctl lab-local-root host wiring."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ FIXTURES = ROOT / "tests" / "fixtures" / "switching"
 HOST_FIXTURE = ROOT / "tests" / "fixtures" / "host-roots" / "local-root" / "host-main.cjs"
 SECRET_A = "sk-custom-openai-fixture"
 SECRET_B = "sk-other-profile-fixture"
+PUBLIC_ENDPOINT = "https://1.1.1.1/v1/chat/completions"
 
 
 class CliRun:
@@ -94,12 +95,13 @@ class CliIntegrationTests(unittest.TestCase):
             json.dumps(
                 {
                     "schemaVersion": 1,
-                    "mode": "local-root",
+                    "mode": "lab-local-root",
                     "hostRoot": str(self.host_root),
                     "stockBundle": str(self.stock),
                     "patchedBundle": str(self.patched),
                     "knownStockDigests": [self.stock_digest],
                     "knownPatchedDigests": [self.patched_digest],
+                    "allowSyntheticApply": True,
                 },
                 indent=2,
             )
@@ -111,7 +113,9 @@ class CliIntegrationTests(unittest.TestCase):
     def add_profile(self, fixture: str) -> CliRun:
         src = FIXTURES / fixture
         dest = self.base / fixture
-        shutil.copyfile(src, dest)
+        payload = json.loads(src.read_text(encoding="utf-8"))
+        payload["baseUrl"] = "https://1.1.1.1/v1"
+        dest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return self.run_cli(["providers", "add", "--file", str(dest)], json_mode=True)
 
     def set_secret(self, profile_id: str, secret: str) -> CliRun:
@@ -124,11 +128,13 @@ class CliIntegrationTests(unittest.TestCase):
     def test_host_configure_show_and_chinese_status(self) -> None:
         configured = self.configure()
         self.assertEqual(configured.code, 0)
-        self.assertEqual(configured.json()["mode"], "local-root")
+        self.assertEqual(configured.json()["mode"], "lab-local-root")
+        self.assertEqual(configured.json()["runtimeKind"], "lab-synthetic")
         shown = self.run_cli(["host", "show"])
         self.assertEqual(shown.code, 0)
         self.assertIn("本机根目录", shown.stdout)
-        self.assertIn("local-root", shown.stdout)
+        self.assertIn("lab-local-root", shown.stdout)
+        self.assertIn("实验室合成", shown.stdout)
         self.assertNotIn(SECRET_A, shown.stdout)
         json_show = self.run_cli(["host", "show"], json_mode=True).json()
         self.assertEqual(json_show["hostRoot"], str(self.host_root))
@@ -138,6 +144,40 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertIn("official", status.stdout)
         self.assertFalse((self.sentinel / ".grokctl").exists())
         self.assertEqual(stat.S_IMODE((self.home / "host.json").stat().st_mode), 0o600)
+        status = self.run_cli(["status"], json_mode=True).json()
+        self.assertEqual(status["runtimeKind"], "lab-synthetic")
+        self.assertTrue(status["host"]["allowSyntheticApply"])
+
+    def test_cli_apply_blocked_without_synthetic_flag(self) -> None:
+        path = self.base / "host-no-apply.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "mode": "lab-local-root",
+                    "hostRoot": str(self.host_root),
+                    "stockBundle": str(self.stock),
+                    "patchedBundle": str(self.patched),
+                    "knownStockDigests": [self.stock_digest],
+                    "knownPatchedDigests": [self.patched_digest],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(self.run_cli(["host", "configure", "--file", str(path)], json_mode=True).code, 0)
+        self.assertEqual(self.add_profile("profile-custom-openai.json").code, 0)
+        self.assertEqual(self.set_secret("custom-openai", SECRET_A).code, 0)
+        plan = self.run_cli(["plan", "custom-openai"], json_mode=True)
+        self.assertEqual(plan.code, 0)
+        self.assertEqual(plan.json()["runtimeKind"], "lab-synthetic")
+        self.assertFalse(plan.json()["allowSyntheticApply"])
+        applied = self.run_cli(["use", "custom-openai", "--apply"], json_mode=True)
+        self.assertEqual(applied.code, 2)
+        self.assertEqual(applied.json()["error"]["code"], "lab-runtime")
+        self.assertIn("实验室", applied.json()["error"]["message"])
+        self.assertNotIn(SECRET_A, applied.stdout)
 
     def test_cli_round_trip_and_rollback(self) -> None:
         self.assertEqual(self.configure().code, 0)
@@ -149,7 +189,8 @@ class CliIntegrationTests(unittest.TestCase):
         plan = self.run_cli(["plan", "custom-openai"])
         self.assertEqual(plan.code, 0)
         self.assertIn("不会改主机", plan.stdout)
-        self.assertIn("POST https://api.example.com/v1/chat/completions", plan.stdout)
+        self.assertIn("POST " + PUBLIC_ENDPOINT, plan.stdout)
+        self.assertIn("实验室合成", plan.stdout)
         self.assertIn("openai-chat", plan.stdout)
         self.assertIn("model-name", plan.stdout)
         self.assertIn("never", plan.stdout)
@@ -165,7 +206,7 @@ class CliIntegrationTests(unittest.TestCase):
         human_use = self.run_cli(["use", "other-profile", "--apply"])
         self.assertEqual(human_use.code, 0, human_use.stderr)
         self.assertIn("已应用", human_use.stdout)
-        self.assertIn("POST https://api.example.com/v1/chat/completions", human_use.stdout)
+        self.assertIn("POST " + PUBLIC_ENDPOINT, human_use.stdout)
         self.assertIn("other-model", human_use.stdout)
 
         status = self.run_cli(["status"], json_mode=True).json()
@@ -179,8 +220,16 @@ class CliIntegrationTests(unittest.TestCase):
         rollback_plan = self.run_cli(["rollback"])
         self.assertIn("custom-openai", rollback_plan.stdout)
         self.assertIn("不会改主机", rollback_plan.stdout)
-        rolled = self.run_cli(["rollback", "--apply"], json_mode=True)
+        self.assertIn("switch-back", rollback_plan.stdout)
+        self.assertIn("不是按快照原样恢复", rollback_plan.stdout)
+        alias = self.run_cli(["rollback"], json_mode=True).json()
+        self.assertEqual(alias["action"], "switch-back")
+        self.assertFalse(alias["exactRestore"])
+        named = self.run_cli(["switch-back"], json_mode=True).json()
+        self.assertEqual(named["action"], "switch-back")
+        rolled = self.run_cli(["switch-back", "--apply"], json_mode=True)
         self.assertEqual(rolled.code, 0, rolled.stderr)
+        self.assertEqual(rolled.json()["action"], "switch-back")
         self.assertEqual(rolled.json()["target"], "custom-openai")
 
         official = self.run_cli(["use", "official", "--apply"], json_mode=True)

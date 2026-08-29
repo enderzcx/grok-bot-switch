@@ -87,7 +87,9 @@ def _build_parser() -> _ArgumentParser:
     verify = sub.add_parser("verify", help="校验当前通道")
     verify.add_argument("--live", action="store_true", help="在线校验（会消耗额度）")
 
-    rollback = sub.add_parser("rollback", help="回滚到上一通道")
+    switch_back = sub.add_parser("switch-back", help="切回上一通道")
+    switch_back.add_argument("--apply", action="store_true", help="应用到主机")
+    rollback = sub.add_parser("rollback", help="切回上一通道（兼容别名）")
     rollback.add_argument("--apply", action="store_true", help="应用到主机")
 
     activity = sub.add_parser("activity", help="查看本地活动")
@@ -147,6 +149,10 @@ def _format_status(payload: Mapping[str, Any]) -> list[str]:
     lines.append(f"  启动时间: {host.get('startedAt')}")
     lines.append(f"  程序校验和: {host.get('bundleDigest')}")
     lines.append(f"  转发: {host.get('hopHealth')}")
+    if host.get("runtimeKind") == "lab-synthetic":
+        lines.append("  运行时: 实验室合成")
+    if host.get("allowSyntheticApply") is False:
+        lines.append("  应用: 未允许")
     lines.append(f"  漂移: {'是' if payload.get('drift') else '否'}")
     blocking = payload.get("blocking") or []
     if blocking:
@@ -194,6 +200,8 @@ def _format_plan(payload: Mapping[str, Any]) -> list[str]:
         f"  动作: {payload.get('action')}",
         f"  目标: {payload.get('target')}",
     ]
+    if payload.get("action") == "switch-back":
+        lines.append("  说明: 会按当前配置新建一次切换，不是按快照原样恢复")
     if payload.get("current"):
         lines.append(f"  当前: {payload.get('current')}")
     method = payload.get("resolvedMethod")
@@ -210,6 +218,10 @@ def _format_plan(payload: Mapping[str, Any]) -> list[str]:
     lines.append(f"  回退: {payload.get('fallbackPolicy', 'never')}")
     secret = payload.get("secret") or {}
     lines.append(f"  密钥: {_secret_line(secret)}")
+    if payload.get("runtimeKind") == "lab-synthetic":
+        lines.append("  运行时: 实验室合成")
+    if payload.get("allowSyntheticApply") is False:
+        lines.append("  应用: 未允许")
     blocking = payload.get("blocking") or []
     if blocking:
         lines.append("  阻塞: " + ", ".join(str(item) for item in blocking))
@@ -236,6 +248,7 @@ def _format_test(payload: Mapping[str, Any]) -> list[str]:
 
 
 def _format_host(payload: Mapping[str, Any]) -> list[str]:
+    allow = payload.get("allowSyntheticApply")
     return [
         "本机根目录",
         f"  模式: {payload.get('mode')}",
@@ -244,6 +257,8 @@ def _format_host(payload: Mapping[str, Any]) -> list[str]:
         f"  已补丁程序: {payload.get('patchedBundle')}",
         f"  已知原厂校验和: {len(payload.get('knownStockDigests') or [])}",
         f"  已知补丁校验和: {len(payload.get('knownPatchedDigests') or [])}",
+        "  运行时: 实验室合成",
+        f"  允许合成应用: {'是' if allow else '否'}",
     ]
 
 
@@ -310,8 +325,8 @@ def _dispatch(service: GrokctlService, args: argparse.Namespace, stdin: Any) -> 
     if command == "verify":
         payload = service.verify(live=bool(args.live))
         return payload, _format_test(payload)
-    if command == "rollback":
-        payload = service.rollback(apply=bool(args.apply))
+    if command in {"rollback", "switch-back"}:
+        payload = service.switch_back(apply=bool(args.apply))
         return payload, _format_plan(payload)
     if command == "activity":
         payload = service.activity(limit=args.limit)

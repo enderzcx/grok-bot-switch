@@ -1,8 +1,9 @@
-"""Wire ProfileRegistry and SecretStore to the local-root switch engine.
+"""Wire ProfileRegistry and SecretStore to the lab-local-root switch engine.
 
 Production switch inputs come from ProviderProfile canonical output and the
 single profile registry. ProfileCatalog is not used. Official remains built-in.
-This module never reads HOME and never SSHes.
+This module never reads HOME, never SSHes, and never installs a global DNS
+resolver. Lab apply is a synthetic runtime and is not a real supervisor.
 """
 
 from __future__ import annotations
@@ -43,7 +44,8 @@ from grokctl.switching import ArtifactSet, SwitchEngine, SwitchError
 
 HOST_CONFIG_NAME = "host.json"
 LOCK_NAME = "lock"
-HOST_MODE_LOCAL_ROOT = "local-root"
+HOST_MODE_LAB_LOCAL_ROOT = "lab-local-root"
+RUNTIME_KIND_LAB_SYNTHETIC = "lab-synthetic"
 MAX_HOST_CONFIG_BYTES = 64 * 1024
 DIGEST_LEN = 64
 ALLOWED_HOST_FIELDS = frozenset(
@@ -55,6 +57,7 @@ ALLOWED_HOST_FIELDS = frozenset(
         "patchedbundle",
         "knownstockdigests",
         "knownpatcheddigests",
+        "allowsyntheticapply",
     }
 )
 
@@ -93,6 +96,9 @@ def switch_message(code: str) -> str:
         "needs-key": "未安装密钥",
         "secret-rejected": "密钥文件不安全",
         "drift": "目标通道与主机实际状态不一致",
+        "lab-runtime": "实验室合成运行时不能应用到主机",
+        "in-use": "该提供方正在使用，不能删除",
+        "switch-back": "切回上一通道会新建一次切换，不是按快照原样恢复",
     }
     return messages.get(public_switch_code(code), "切换未能完成")
 
@@ -137,6 +143,15 @@ def _require_str(value: object, label: str) -> str:
         raise ValidationError(f"{label}必须是文本")
     if _has_ctl(value) or value != value.strip():
         raise ValidationError(f"{label}不能包含空白或控制字符")
+    return value
+
+
+def _optional_bool(raw: Mapping[str, Any], key: str, default: bool) -> bool:
+    if key not in raw:
+        return default
+    value = raw[key]
+    if not isinstance(value, bool):
+        raise ValidationError(f"{key}必须是布尔值")
     return value
 
 
@@ -213,6 +228,7 @@ class HostConfig:
     patched_bundle: Path
     known_stock_digests: tuple[str, ...]
     known_patched_digests: tuple[str, ...]
+    allow_synthetic_apply: bool = False
 
     def known_bundle_digests(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(list(self.known_stock_digests) + list(self.known_patched_digests)))
@@ -226,6 +242,7 @@ class HostConfig:
             "patchedBundle": str(self.patched_bundle),
             "knownStockDigests": list(self.known_stock_digests),
             "knownPatchedDigests": list(self.known_patched_digests),
+            "allowSyntheticApply": self.allow_synthetic_apply,
         }
 
     def artifacts(self) -> ArtifactSet:
@@ -256,8 +273,9 @@ def parse_host_config(raw: object) -> HostConfig:
     if schema != SCHEMA_VERSION:
         raise ValidationError("schemaVersion 必须是 1")
     mode = _require_str(mapping.get("mode"), "mode")
-    if mode != HOST_MODE_LOCAL_ROOT:
-        raise ValidationError("mode 必须是 local-root")
+    if mode != HOST_MODE_LAB_LOCAL_ROOT:
+        raise ValidationError("mode 必须是 lab-local-root")
+    allow_synthetic_apply = _optional_bool(mapping, "allowSyntheticApply", False)
     host_root = _require_existing_dir(_require_absolute_path(mapping.get("hostRoot"), "hostRoot"), "hostRoot")
     stock = _require_existing_file(
         _require_absolute_path(mapping.get("stockBundle"), "stockBundle"), "stockBundle"
@@ -281,6 +299,7 @@ def parse_host_config(raw: object) -> HostConfig:
         patched_bundle=patched,
         known_stock_digests=known_stock,
         known_patched_digests=known_patched,
+        allow_synthetic_apply=allow_synthetic_apply,
     )
 
 
@@ -391,10 +410,17 @@ def _profile_id_from_ref(secret_ref: str) -> str:
     return text[len(prefix) :]
 
 
-def _install_loopback_resolver() -> None:
+@contextmanager
+def temporary_host_resolver(resolver: Any) -> Iterator[None]:
+    """Test-only DNS injection. Always restores the previous resolver."""
+
     hop = load_provider_hop()
-    if hop.get_host_resolver() is None:
-        hop.set_host_resolver(lambda _host: ("8.8.8.8",))
+    previous = hop.get_host_resolver()
+    hop.set_host_resolver(resolver)
+    try:
+        yield
+    finally:
+        hop.set_host_resolver(previous)
 
 
 def hydrate_runtime(runtime: HostRuntime) -> HostRuntime:
@@ -447,14 +473,38 @@ def build_switch_engine(
     *,
     runtime: Optional[HostRuntime] = None,
 ) -> SwitchEngine:
-    _install_loopback_resolver()
     host = runtime if runtime is not None else build_host_runtime(config)
     if not isinstance(host, SecretAwareRuntime):
         host = SecretAwareRuntime(host, secrets)
     return SwitchEngine(host, RegistryCatalog(registry), config.artifacts())
 
 
-def verified_rollback_target(runtime: HostRuntime) -> tuple[str, dict[str, object]]:
+def _mismatch(message: str = "主机状态已变化，请重新查看计划") -> GrokctlError:
+    return GrokctlError(message, code="snapshot-mismatch")
+
+
+def _regular_file(path: Path) -> bytes:
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError as exc:
+        raise _mismatch() from exc
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise _mismatch()
+    return path.read_bytes()
+
+
+def current_profile_digest(registry: ProfileRegistry, profile_id: str) -> str:
+    if profile_id == OFFICIAL_ID:
+        profile = official_profile()
+    else:
+        profile = registry.get(profile_id)
+    return profile.digest()
+
+
+def verified_switch_back_target(
+    runtime: HostRuntime,
+    registry: ProfileRegistry,
+) -> tuple[str, dict[str, object]]:
     try:
         receipt = runtime.current_receipt()
     except HostError as exc:
@@ -469,8 +519,8 @@ def verified_rollback_target(runtime: HostRuntime) -> tuple[str, dict[str, objec
     snapshot_profile = snapshot.get("profileId")
     if not isinstance(previous, str) or not previous:
         raise GrokctlError(switch_message("missing-receipt"), code="missing-receipt")
-    if isinstance(snapshot_profile, str) and snapshot_profile and snapshot_profile != previous:
-        raise GrokctlError(switch_message("missing-receipt"), code="missing-receipt")
+    if snapshot_profile != previous:
+        raise _mismatch()
     if not isinstance(snapshot_dir, str) or not snapshot_dir:
         raise GrokctlError(switch_message("missing-receipt"), code="missing-receipt")
     path = Path(snapshot_dir)
@@ -480,7 +530,66 @@ def verified_rollback_target(runtime: HostRuntime) -> tuple[str, dict[str, objec
         raise GrokctlError(switch_message("missing-receipt"), code="missing-receipt") from exc
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
         raise GrokctlError(switch_message("missing-receipt"), code="missing-receipt")
+    bundle_digest = sha256_hex(_regular_file(path / "host-main.cjs"))
+    expected_bundle = snapshot.get("bundleDigest")
+    if not isinstance(expected_bundle, str) or bundle_digest != expected_bundle:
+        raise _mismatch()
+    meta_raw = _regular_file(path / "meta.json")
+    try:
+        meta = json.loads(meta_raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _mismatch() from exc
+    if not isinstance(meta, dict):
+        raise _mismatch()
+    state = meta.get("state")
+    if not isinstance(state, dict):
+        raise _mismatch()
+    if state.get("activeProfile") != previous:
+        raise _mismatch()
+    if int(state.get("generation") or -1) != int(snapshot.get("generation") or -2):
+        raise _mismatch()
+    try:
+        digest = current_profile_digest(registry, previous)
+    except GrokctlError as exc:
+        raise _mismatch() from exc
+    if snapshot.get("profileDigest") != digest:
+        raise _mismatch()
+    expected_config = snapshot.get("configDigest")
+    config_path = path / "external.json"
+    if expected_config in {None, ""}:
+        if config_path.exists() or config_path.is_symlink():
+            raise _mismatch()
+    else:
+        if not isinstance(expected_config, str):
+            raise _mismatch()
+        if sha256_hex(_regular_file(config_path)) != expected_config:
+            raise _mismatch()
     return previous, receipt
+
+
+def referenced_profile_ids(runtime: Optional[HostRuntime]) -> set[str]:
+    refs: set[str] = set()
+    if runtime is None:
+        return refs
+    observed = runtime.observe()
+    if observed.profile_id:
+        refs.add(str(observed.profile_id))
+    try:
+        receipt = runtime.current_receipt()
+    except HostError:
+        receipt = None
+    if not isinstance(receipt, dict):
+        return refs
+    for key in ("requestedProfile", "previousProfile"):
+        value = receipt.get(key)
+        if isinstance(value, str) and value:
+            refs.add(value)
+    snapshot = receipt.get("previousSnapshot") or {}
+    if isinstance(snapshot, dict):
+        profile_id = snapshot.get("profileId")
+        if isinstance(profile_id, str) and profile_id:
+            refs.add(profile_id)
+    return refs
 
 
 def collect_blockers(
@@ -493,6 +602,7 @@ def collect_blockers(
     runtime: Optional[HostRuntime],
     config: Optional[HostConfig],
     require_receipt: bool = False,
+    registry: Optional[ProfileRegistry] = None,
 ) -> list[str]:
     blocking: list[str] = []
     if not enabled:
@@ -513,10 +623,13 @@ def collect_blockers(
     if not digest or digest not in config.known_bundle_digests():
         blocking.append("unknown-hash")
     if require_receipt:
-        try:
-            verified_rollback_target(runtime)
-        except GrokctlError:
+        if registry is None:
             blocking.append("missing-receipt")
+        else:
+            try:
+                verified_switch_back_target(runtime, registry)
+            except GrokctlError as exc:
+                blocking.append(public_switch_code(exc.code))
     return blocking
 
 
@@ -526,7 +639,17 @@ def public_receipt(receipt: Optional[Mapping[str, object]]) -> Optional[dict[str
     payload = dict(receipt)
     for key in ("secret", "token", "authorization", "apiKey", "secretFile"):
         payload.pop(key, None)
+    payload["runtimeKind"] = RUNTIME_KIND_LAB_SYNTHETIC
     return payload
+
+
+def lab_runtime_fields(config: Optional[HostConfig]) -> dict[str, object]:
+    if config is None:
+        return {"runtimeKind": None, "allowSyntheticApply": False}
+    return {
+        "runtimeKind": RUNTIME_KIND_LAB_SYNTHETIC,
+        "allowSyntheticApply": bool(config.allow_synthetic_apply),
+    }
 
 
 def status_from_host(
@@ -555,6 +678,8 @@ def status_from_host(
         "hopHealth": None,
         "hopPid": None,
         "generation": 0,
+        "runtimeKind": None,
+        "allowSyntheticApply": False,
     }
     active_profile = None
     if config is None or runtime is None:
@@ -573,6 +698,7 @@ def status_from_host(
             "providers": providers,
             "secretsInstalled": secrets_installed,
             "fallbackPolicy": "never",
+            **lab_runtime_fields(None),
         }
     observed = runtime.observe()
     try:
@@ -624,6 +750,8 @@ def status_from_host(
         "hopHealth": observed.hop_health,
         "hopPid": observed.hop_pid,
         "generation": generation,
+        "runtimeKind": RUNTIME_KIND_LAB_SYNTHETIC,
+        "allowSyntheticApply": bool(config.allow_synthetic_apply),
     }
     if not drift and not blockers:
         active_profile = observed_profile
@@ -641,4 +769,5 @@ def status_from_host(
         "providers": providers,
         "secretsInstalled": secrets_installed,
         "fallbackPolicy": "never",
+        **lab_runtime_fields(config),
     }

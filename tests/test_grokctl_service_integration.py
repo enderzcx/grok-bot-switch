@@ -19,9 +19,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from grokctl.integration import BusyError, ExclusiveLock  # noqa: E402
-from grokctl.models import GrokctlError, NotWiredError, ValidationError, sha256_hex  # noqa: E402
-from grokctl.remote import sha256_file  # noqa: E402
+from grokctl.integration import (  # noqa: E402
+    BusyError,
+    ExclusiveLock,
+    build_switch_engine,
+    load_host_config,
+    temporary_host_resolver,
+)
+from grokctl.models import ConflictError, GrokctlError, NotWiredError, ValidationError, sha256_hex  # noqa: E402
+from grokctl.remote import load_provider_hop, sha256_file  # noqa: E402
 from grokctl.service import GrokctlService  # noqa: E402
 
 
@@ -29,10 +35,15 @@ FIXTURES = ROOT / "tests" / "fixtures" / "switching"
 HOST_FIXTURE = ROOT / "tests" / "fixtures" / "host-roots" / "local-root" / "host-main.cjs"
 SECRET_A = "sk-custom-openai-fixture"
 SECRET_B = "sk-other-profile-fixture"
+PUBLIC_BASE = "https://1.1.1.1/v1"
+PUBLIC_ENDPOINT = "https://1.1.1.1/v1/chat/completions"
 
 
-def load_profile(name: str) -> dict:
-    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+def load_profile(name: str, **overrides: object) -> dict:
+    payload = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+    payload["baseUrl"] = PUBLIC_BASE
+    payload.update(overrides)
+    return payload
 
 
 class ServiceIntegrationTests(unittest.TestCase):
@@ -62,19 +73,20 @@ class ServiceIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _host_file(self) -> dict[str, object]:
+    def _host_file(self, *, allow_apply: bool = True) -> dict[str, object]:
         return {
             "schemaVersion": 1,
-            "mode": "local-root",
+            "mode": "lab-local-root",
             "hostRoot": str(self.host_root),
             "stockBundle": str(self.stock),
             "patchedBundle": str(self.patched),
             "knownStockDigests": [self.stock_digest],
             "knownPatchedDigests": [self.patched_digest],
+            "allowSyntheticApply": allow_apply,
         }
 
-    def _configure(self) -> None:
-        self.service.configure_host(self._host_file())
+    def _configure(self, *, allow_apply: bool = True) -> None:
+        self.service.configure_host(self._host_file(allow_apply=allow_apply))
 
     def _add_and_key(self, name: str, secret: str) -> None:
         self.service.add_provider(load_profile(name))
@@ -118,7 +130,8 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertFalse(plan["hostMutation"])
         self.assertEqual(plan["blocking"], [])
         self.assertEqual(plan["resolvedMethod"], "POST")
-        self.assertEqual(plan["resolvedEndpoint"], "https://api.example.com/v1/chat/completions")
+        self.assertEqual(plan["resolvedEndpoint"], PUBLIC_ENDPOINT)
+        self.assertEqual(plan["runtimeKind"], "lab-synthetic")
         self.assertEqual(plan["protocol"], "openai-chat")
         self.assertEqual(plan["model"], "model-name")
         self.assertEqual(plan["fallbackPolicy"], "never")
@@ -128,6 +141,8 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertFalse(applied["dryRun"])
         self.assertEqual(applied["receipt"]["requestedProfile"], "custom-openai")
         self.assertFalse(applied["receipt"]["liveVerified"])
+        self.assertEqual(applied["runtimeKind"], "lab-synthetic")
+        self.assertEqual(applied["receipt"]["runtimeKind"], "lab-synthetic")
         blob = json.dumps(applied)
         self.assertNotIn(SECRET_A, blob)
 
@@ -172,9 +187,12 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.service.use("other-profile", apply=True)
         preview = self.service.rollback(apply=False)
         self.assertTrue(preview["dryRun"])
+        self.assertEqual(preview["action"], "switch-back")
+        self.assertFalse(preview["exactRestore"])
         self.assertEqual(preview["target"], "custom-openai")
         self.assertNotEqual(preview["target"], "official")
-        rolled = self.service.rollback(apply=True)
+        rolled = self.service.switch_back(apply=True)
+        self.assertEqual(rolled["action"], "switch-back")
         self.assertEqual(rolled["target"], "custom-openai")
         self.assertTrue(rolled["hostMutation"])
         status = self.service.status()
@@ -222,9 +240,11 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertTrue(receipt.is_file())
         receipt.unlink()
         missing = self.service.rollback(apply=False)
+        self.assertEqual(missing["action"], "switch-back")
         self.assertIn("missing-receipt", missing["blocking"])
-        with self.assertRaises(ValidationError) as ctx:
+        with self.assertRaises(GrokctlError) as ctx:
             self.service.rollback(apply=True)
+        self.assertEqual(ctx.exception.code, "missing-receipt")
         self.assertIn("回执", str(ctx.exception))
 
     def test_busy_lock_rejects_second_process_without_stealing(self) -> None:
@@ -280,6 +300,131 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertTrue((self.home / "host.json").is_file())
         self.assertTrue((self.home / "profiles.json").is_file())
         self.assertTrue((self.home / "secrets" / "profile" / "custom-openai").is_file())
+
+    def test_lab_apply_requires_explicit_flag(self) -> None:
+        self._configure(allow_apply=False)
+        self._add_and_key("profile-custom-openai.json", SECRET_A)
+        plan = self.service.plan("custom-openai")
+        self.assertEqual(plan["runtimeKind"], "lab-synthetic")
+        self.assertFalse(plan["allowSyntheticApply"])
+        self.assertFalse(plan["hostMutation"])
+        with self.assertRaises(GrokctlError) as ctx:
+            self.service.use("custom-openai", apply=True)
+        self.assertEqual(ctx.exception.code, "lab-runtime")
+        status = self.service.status()
+        self.assertEqual(status["runtimeKind"], "lab-synthetic")
+        self.assertEqual(status["host"]["runtimeKind"], "lab-synthetic")
+        self.assertFalse(status["host"]["allowSyntheticApply"])
+        self.assertEqual(status["observedProfile"], "official")
+        self.assertNotEqual(status["activeProfile"], "custom-openai")
+        self.assertIsNone(status["lastReceipt"])
+
+    def test_engine_does_not_install_global_dns_resolver(self) -> None:
+        hop = load_provider_hop()
+        previous = hop.get_host_resolver()
+        hop.set_host_resolver(None)
+        try:
+            self._configure(allow_apply=True)
+            config = load_host_config(self.home)
+            self.assertIsNotNone(config)
+            build_switch_engine(self.service.registry, self.service.secrets, config)
+            self.assertIsNone(hop.get_host_resolver())
+        finally:
+            hop.set_host_resolver(previous)
+
+    def test_scoped_resolver_rejects_private_mapping_and_restores(self) -> None:
+        hop = load_provider_hop()
+        previous = hop.get_host_resolver()
+        self._configure(allow_apply=True)
+        self.service.add_provider(
+            load_profile("profile-custom-openai.json", baseUrl="https://api.example.com/v1")
+        )
+        self.service.set_secret("custom-openai", io.BytesIO(SECRET_A.encode("ascii")))
+        with temporary_host_resolver(lambda _host: ("10.0.0.1",)):
+            plan = self.service.plan("custom-openai")
+            self.assertIn("unsafe-endpoint", plan["blocking"])
+        self.assertEqual(hop.get_host_resolver(), previous)
+
+    def test_switch_back_blocks_tampered_snapshot_bundle_metadata_profile_and_digest(self) -> None:
+        self._configure()
+        self._add_and_key("profile-custom-openai.json", SECRET_A)
+        self._add_and_key("profile-other.json", SECRET_B)
+        first = self.service.use("custom-openai", apply=True)
+        snapshot_dir = Path(first["receipt"]["previousSnapshot"]["snapshotDir"])
+        bundle = snapshot_dir / "host-main.cjs"
+        original_bundle = bundle.read_bytes()
+        bundle.write_bytes(b"TAMPERED_SNAPSHOT_BUNDLE\n")
+        with self.assertRaises(GrokctlError) as ctx:
+            self.service.switch_back(apply=True)
+        self.assertEqual(ctx.exception.code, "snapshot-mismatch")
+        bundle.write_bytes(original_bundle)
+
+        meta_path = snapshot_dir / "meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        original_meta = json.dumps(meta)
+        meta["state"]["activeProfile"] = "other-profile"
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        os.chmod(meta_path, 0o600)
+        with self.assertRaises(GrokctlError) as ctx:
+            self.service.switch_back(apply=True)
+        self.assertEqual(ctx.exception.code, "snapshot-mismatch")
+        meta_path.write_text(original_meta + "\n", encoding="utf-8")
+        os.chmod(meta_path, 0o600)
+
+        receipt_path = self.host_root / "grokctl" / "receipts" / "current.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        original_receipt = json.dumps(receipt)
+        receipt["previousSnapshot"]["profileDigest"] = "0" * 64
+        receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        with self.assertRaises(GrokctlError) as ctx:
+            self.service.switch_back(apply=True)
+        self.assertEqual(ctx.exception.code, "snapshot-mismatch")
+        receipt_path.write_text(original_receipt + "\n", encoding="utf-8")
+
+        self.service.use("other-profile", apply=True)
+        profiles_path = self.home / "profiles.json"
+        doc = json.loads(profiles_path.read_text(encoding="utf-8"))
+        doc["profiles"]["custom-openai"]["displayName"] = "Renamed Provider"
+        profiles_path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        os.chmod(profiles_path, 0o600)
+        with self.assertRaises(GrokctlError) as ctx:
+            self.service.switch_back(apply=True)
+        self.assertEqual(ctx.exception.code, "snapshot-mismatch")
+
+    def test_remove_provider_blocks_active_desired_previous_and_allows_unrelated(self) -> None:
+        self._configure()
+        self._add_and_key("profile-custom-openai.json", SECRET_A)
+        self._add_and_key("profile-other.json", SECRET_B)
+        self.service.add_provider(
+            load_profile(
+                "profile-other.json",
+                id="unrelated-profile",
+                displayName="Unrelated",
+                auth={"type": "bearer"},
+            )
+        )
+        self.service.set_secret("unrelated-profile", io.BytesIO(b"sk-unrelated-profile-key"))
+        self.service.use("custom-openai", apply=True)
+        with self.assertRaises(ConflictError):
+            self.service.remove_provider("custom-openai")
+        self.service.use("other-profile", apply=True)
+        with self.assertRaises(ConflictError):
+            self.service.remove_provider("other-profile")
+        with self.assertRaises(ConflictError):
+            self.service.remove_provider("custom-openai")
+        removed = self.service.remove_provider("unrelated-profile")
+        self.assertTrue(removed["removed"])
+        listed = self.service.list_providers()
+        ids = [item["id"] for item in listed["providers"]]
+        self.assertIn("custom-openai", ids)
+        self.assertIn("other-profile", ids)
+        self.assertNotIn("unrelated-profile", ids)
+
+    def test_legacy_local_root_mode_is_rejected(self) -> None:
+        payload = self._host_file()
+        payload["mode"] = "local-root"
+        with self.assertRaises(ValidationError):
+            self.service.configure_host(payload)
 
 
 class LockContractTests(unittest.TestCase):
