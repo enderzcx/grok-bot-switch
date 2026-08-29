@@ -509,7 +509,7 @@ test("beefApiChunkToHostEvents maps parallel tool-call chunks onto host stream p
   assert.deepEqual(events[7].usage, { promptTokens: 11, completionTokens: 5, totalTokens: 16 });
 });
 
-test("flushing a finished decoder emits a terminal finish when usage never arrived", () => {
+test("flushing a finished decoder fails closed when usage never arrived", () => {
   const wire = loadWire();
   const decoder = wire.createBeefApiSseDecoder();
   const accumulator = wire.createBeefApiToolCallAccumulator();
@@ -519,14 +519,11 @@ test("flushing a finished decoder emits a terminal finish when usage never arriv
   }) + "data: [DONE]\n\n");
   events.push(...decoder.push(bytes));
   events.push(...decoder.end());
-  const hostEvents = [];
-  for (const event of events) {
-    hostEvents.push(...wire.beefApiChunkToHostEvents(event, accumulator));
-  }
-  assert.equal(hostEvents[0].type, "text-delta");
-  assert.equal(hostEvents[1].type, "finish");
-  assert.equal(hostEvents[1].finishReason, "length");
-  assert.deepEqual(hostEvents[1].usage, { promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+  assert.equal(wire.beefApiChunkToHostEvents(events[0], accumulator)[0].type, "text-delta");
+  assert.throws(
+    () => wire.beefApiChunkToHostEvents(events[1], accumulator),
+    /without usage/
+  );
 });
 
 test("empty message and tool lists convert to empty OpenAI arrays", () => {

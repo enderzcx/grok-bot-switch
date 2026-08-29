@@ -1,4 +1,4 @@
-// Injected into the 0.30 host bundle. Do not assign module.exports.
+// Injected into the 0.30 host bundle. Keep this file free of export assignments.
 // Wire helpers are same-scope free variables from beefapi-openai-wire.cjs:
 //   parseBeefApiDirectConfig(raw) -> config | null
 //   toBeefApiOpenAiMessages(messages) -> OpenAI messages
@@ -103,7 +103,7 @@ function beefApiDirectUsageFromFinish(event) {
   };
 }
 
-function beefApiDirectExtendedUsageFromFinish(event, usage) {
+function beefApiDirectExtendedUsageFromFinish(event, usage, requestedMaxTokens) {
   var extended = event == null ? null : event.extendedUsage;
   if (extended != null && typeof extended === "object") {
     return {
@@ -111,7 +111,7 @@ function beefApiDirectExtendedUsageFromFinish(event, usage) {
       outputTokens: Number(extended.outputTokens) || 0,
       cacheReadTokens: Number(extended.cacheReadTokens) || 0,
       cacheWriteTokens: Number(extended.cacheWriteTokens) || 0,
-      maxTokens: Number(extended.maxTokens) || 0
+      maxTokens: Number(extended.maxTokens) || Number(requestedMaxTokens) || 0
     };
   }
   if (usage == null) return null;
@@ -120,7 +120,7 @@ function beefApiDirectExtendedUsageFromFinish(event, usage) {
     outputTokens: usage.completionTokens,
     cacheReadTokens: Number(usage.cacheReadTokens) || 0,
     cacheWriteTokens: Number(usage.cacheWriteTokens) || 0,
-    maxTokens: Number(usage.maxTokens) || 0
+    maxTokens: Number(usage.maxTokens) || Number(requestedMaxTokens) || 0
   };
 }
 
@@ -392,8 +392,11 @@ function streamBeefApiDirect(executor, ctx, invocationId, tools, options) {
       if (usage == null) {
         throw new Error("BeefAPI direct stream finished without usage");
       }
-      var extendedUsage = beefApiDirectExtendedUsageFromFinish(finishEvent, usage);
-      var requestId = headerRequestId || finishEvent.requestId;
+      var requestedMaxTokens = options != null ? options.maxTokens : null;
+      var extendedUsage = beefApiDirectExtendedUsageFromFinish(finishEvent, usage, requestedMaxTokens);
+      var requestId = headerRequestId
+        || finishEvent.requestId
+        || (finishEvent.response != null ? finishEvent.response.id : null);
       var providerMetadata = finishEvent.providerMetadata != null && typeof finishEvent.providerMetadata === "object"
         ? { ...finishEvent.providerMetadata }
         : {};

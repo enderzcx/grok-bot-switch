@@ -233,6 +233,9 @@ function createBeefApiSseDecoder() {
       }
       return events;
     },
+    close: function () {
+      return this.end();
+    },
     isDone: function () {
       return done;
     }
@@ -998,6 +1001,9 @@ function beefApiTakeFinishEvents(accumulator, force) {
   if (accumulator.hasFinishEmitted()) {
     return [];
   }
+  if (force && usage == null) {
+    throw new Error("BeefAPI OpenAI stream finished without usage");
+  }
   var events = [];
   if (reason != null || force) {
     var completed = accumulator.complete();
@@ -1005,19 +1011,27 @@ function beefApiTakeFinishEvents(accumulator, force) {
       events.push(completed[i]);
     }
   }
-  var finishUsage = usage != null
-    ? {
-      promptTokens: usage.promptTokens,
-      completionTokens: usage.completionTokens,
-      totalTokens: usage.totalTokens
-    }
-    : { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  var finishUsage = {
+    promptTokens: usage.promptTokens,
+    completionTokens: usage.completionTokens,
+    totalTokens: usage.totalTokens
+  };
   var meta = accumulator.getResponseMeta();
   var finish = {
     type: "finish",
     finishReason: reason == null ? "stop" : reason,
-    usage: finishUsage
+    usage: finishUsage,
+    extendedUsage: {
+      inputTokens: usage.promptTokens,
+      outputTokens: usage.completionTokens,
+      cacheReadTokens: usage.cacheReadTokens,
+      cacheWriteTokens: usage.cacheWriteTokens,
+      maxTokens: 0
+    }
   };
+  if (meta.id.length > 0) {
+    finish.requestId = meta.id;
+  }
   if (meta.id.length > 0 || meta.modelId.length > 0) {
     finish.response = {
       id: meta.id,
