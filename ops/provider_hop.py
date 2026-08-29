@@ -9,10 +9,12 @@ response bodies are never logged.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import stat
 import time
 import urllib.error
@@ -21,11 +23,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Callable, Dict, Iterable, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
 
 MAX_BODY = 64 * 1024 * 1024
+MAX_CONFIG_BYTES = 64 * 1024
+MAX_SECRET_BYTES = 64 * 1024
+DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 LOG = logging.getLogger("grokctl-provider-hop")
 HEADER_TOKEN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"})
@@ -83,10 +88,41 @@ FORBIDDEN_CONFIG_KEYS = frozenset(
     }
 )
 ALLOWED_CONFIG_KEY_EXCEPTIONS = frozenset({"secretfile", "secretref"})
+LOOPBACK_NAMES = frozenset({"localhost", "ip6-localhost", "ip6-loopback"})
+
+_host_resolver = None  # type: Optional[Callable[[str], Iterable[str]]]
 
 
 class HopError(RuntimeError):
     """Fail-closed hop error. Messages must not contain credentials."""
+
+
+def set_host_resolver(resolver: Optional[Callable[[str], Iterable[str]]]) -> None:
+    """Replace DNS resolution. Tests inject a deterministic mapping."""
+
+    global _host_resolver
+    _host_resolver = resolver
+
+
+def get_host_resolver() -> Optional[Callable[[str], Iterable[str]]]:
+    return _host_resolver
+
+
+def resolve_host(hostname: str) -> Tuple[str, ...]:
+    if _host_resolver is not None:
+        return tuple(str(item) for item in _host_resolver(hostname))
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as exc:
+        raise HopError("unsafe url") from exc
+    addresses = []
+    for info in infos:
+        sockaddr = info[4]
+        if sockaddr:
+            addresses.append(str(sockaddr[0]))
+    if not addresses:
+        raise HopError("unsafe url")
+    return tuple(addresses)
 
 
 class RedirectRefused(urllib.error.URLError):
@@ -123,6 +159,7 @@ class HopConfig:
     timeout_sec: float
     receipt_file: str
     anthropic_version: Optional[str]
+    max_response_bytes: int
 
 
 @dataclass(frozen=True)
@@ -138,13 +175,41 @@ def isoformat_z(ts: Optional[float] = None) -> str:
 
 def is_loopback_host(host: str) -> bool:
     name = str(host or "").strip().strip("[]").lower()
-    if name in LOOPBACK_HOSTS:
+    if name in LOOPBACK_HOSTS or name in LOOPBACK_NAMES:
         return True
-    if name.startswith("127."):
-        parts = name.split(".")
-        if len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts):
-            return True
+    try:
+        parsed = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return bool(parsed.is_loopback)
+
+
+def is_disallowed_ip(addr: str) -> bool:
+    try:
+        parsed = ipaddress.ip_address(str(addr).strip().strip("[]"))
+    except ValueError:
+        return True
+    if parsed.is_loopback:
+        return False
+    if (
+        parsed.is_private
+        or parsed.is_link_local
+        or parsed.is_multicast
+        or parsed.is_reserved
+        or parsed.is_unspecified
+        or not parsed.is_global
+    ):
+        return True
     return False
+
+
+def _literal_ip(host: str) -> Optional[str]:
+    name = str(host or "").strip().strip("[]")
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return None
+    return name
 
 
 def validate_endpoint(url: str, *, allow_http_loopback: bool = True) -> Tuple[str, str, str]:
@@ -159,9 +224,28 @@ def validate_endpoint(url: str, *, allow_http_loopback: bool = True) -> Tuple[st
         raise HopError("unsafe url")
     if not parsed.netloc or not parsed.hostname:
         raise HopError("unsafe url")
-    if parsed.scheme == "http":
-        if not allow_http_loopback or not is_loopback_host(parsed.hostname):
+    hostname = parsed.hostname
+    literal = _literal_ip(hostname)
+    if literal is not None:
+        addresses = (literal,)
+        loopback = is_loopback_host(literal)
+    elif hostname.lower() in LOOPBACK_NAMES:
+        addresses = ("127.0.0.1",)
+        loopback = True
+    else:
+        loopback = False
+        addresses = resolve_host(hostname)
+        if not addresses:
             raise HopError("unsafe url")
+    if parsed.scheme == "http":
+        if not allow_http_loopback or not loopback:
+            raise HopError("unsafe url")
+        if any(not is_loopback_host(addr) for addr in addresses):
+            raise HopError("unsafe url")
+    else:
+        for addr in addresses:
+            if is_disallowed_ip(addr):
+                raise HopError("unsafe url")
     origin = "%s://%s" % (parsed.scheme, parsed.netloc)
     path = parsed.path or "/"
     return origin, path, parsed.query
@@ -227,17 +311,36 @@ def _assert_no_secret_material(value: object) -> None:
             _assert_no_secret_material(child)
 
 
-def _require_regular_private_file(path: Path, label: str) -> None:
-    info = path.lstat()
-    if path.is_symlink() or not stat.S_ISREG(info.st_mode):
+def _open_nofollow_read(path: Path, *, max_bytes: int, label: str) -> bytes:
+    if path.is_symlink():
         raise HopError("%s must be a direct regular file" % label)
-    if stat.S_IMODE(info.st_mode) & 0o077:
-        raise HopError("%s must not be accessible to group or others" % label)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(path), flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise HopError("%s must be a direct regular file" % label)
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise HopError("%s must not be accessible to group or others" % label)
+        if info.st_size > max_bytes:
+            raise HopError("%s exceeds size limit" % label)
+        chunks = []
+        remaining = int(info.st_size)
+        while remaining > 0:
+            chunk = os.read(fd, min(8192, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 def load_secret(path: Path) -> str:
-    _require_regular_private_file(path, "credential path")
-    raw = path.read_bytes()
+    raw = _open_nofollow_read(path, max_bytes=MAX_SECRET_BYTES, label="credential path")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -288,12 +391,23 @@ def inspect_secret_metadata(path: Path) -> Dict[str, object]:
     return result
 
 
+def _validate_receipt_target(path: Path) -> None:
+    if path.is_symlink():
+        raise HopError("receipt file must be a direct regular file")
+    if not path.exists():
+        return
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise HopError("receipt file must be a direct regular file")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise HopError("receipt file must not be accessible to group or others")
+
+
 def load_config(path: Path) -> HopConfig:
-    if path.is_symlink() or not path.is_file():
-        raise HopError("hop config must be a direct regular file")
+    raw = _open_nofollow_read(path, max_bytes=MAX_CONFIG_BYTES, label="hop config")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HopError("hop config is invalid") from exc
     if not isinstance(payload, dict):
         raise HopError("hop config is invalid")
@@ -344,6 +458,13 @@ def load_config(path: Path) -> HopConfig:
     endpoint_path = str(payload.get("endpointPath") or PROTOCOL_DEFAULT_PATHS[protocol])
     if urlparse(resolved).path != endpoint_path:
         raise HopError("resolved endpoint is internally inconsistent")
+    try:
+        max_response = int(payload.get("maxResponseBytes") or DEFAULT_MAX_RESPONSE_BYTES)
+    except (TypeError, ValueError) as exc:
+        raise HopError("invalid max response size") from exc
+    if max_response <= 0 or max_response > DEFAULT_MAX_RESPONSE_BYTES:
+        raise HopError("invalid max response size")
+    _validate_receipt_target(Path(receipt_file))
     return HopConfig(
         schema_version=schema_version,
         listen_host=listen_host,
@@ -360,6 +481,7 @@ def load_config(path: Path) -> HopConfig:
         timeout_sec=timeout,
         receipt_file=receipt_file,
         anthropic_version=str(anthropic) if anthropic else None,
+        max_response_bytes=max_response,
     )
 
 
@@ -399,33 +521,34 @@ def health_payload(runtime: HopRuntime, bound_port: Optional[int] = None) -> Dic
 
 
 def append_receipt(path: Path, payload: Mapping[str, object]) -> None:
+    path = Path(path)
+    if path.parent.exists() and path.parent.is_symlink():
+        raise HopError("receipt file must be a direct regular file")
     path.parent.mkdir(parents=True, exist_ok=True)
-    serialized = json.dumps(dict(payload), sort_keys=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(serialized + "\n")
-
-
-def _sanitize_request_path(raw_path: str) -> str:
-    if any(ch in raw_path for ch in "\r\n\0"):
-        raise HopError("unsafe request path")
-    path = raw_path.split("?", 1)[0]
-    if not path.startswith("/") or path.startswith("//") or "://" in path:
-        raise HopError("unsafe request path")
-    if any(part == ".." for part in path.split("/")):
-        raise HopError("unsafe request path")
-    return raw_path
-
-
-def _upstream_url(config: HopConfig, raw_path: str) -> str:
-    _sanitize_request_path(raw_path)
-    path, query = (raw_path.split("?", 1) + [""])[:2]
-    if any(ch in query for ch in "\r\n\0"):
-        raise HopError("unsafe request path")
-    url = config.upstream_origin + path
-    if query:
-        url += "?" + query
-    validate_endpoint(url.split("?", 1)[0])
-    return url
+    _validate_receipt_target(path)
+    serialized = (json.dumps(dict(payload), sort_keys=True) + "\n").encode("utf-8")
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise HopError("receipt file must be a direct regular file")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise HopError("receipt file must not be accessible to group or others")
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        offset = 0
+        view = memoryview(serialized)
+        while offset < len(serialized):
+            written = os.write(fd, view[offset:])
+            if written <= 0:
+                raise OSError("short write")
+            offset += written
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _build_opener() -> urllib.request.OpenerDirector:
@@ -512,14 +635,23 @@ def make_handler(runtime: HopRuntime):
                 request.add_header(name, value)
             request.add_header("Accept-Encoding", "identity")
 
+        def _read_bounded(self, response: object, limit: int) -> bytes:
+            chunks = []
+            total = 0
+            while True:
+                chunk = response.read(8192)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > limit:
+                    raise HopError("upstream response too large")
+                chunks.append(chunk)
+            return b"".join(chunks)
+
         def relay(self) -> None:
             started = time.time()
             request_kind = self.headers.get("X-Grok-Request-Kind", "unknown")
-            try:
-                url = _upstream_url(runtime.config, self.path)
-            except HopError:
-                self.simple(400, {"error": {"type": "hop_error", "message": "unsafe request path"}})
-                return
+            url = runtime.config.resolved_endpoint
             try:
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
@@ -529,7 +661,7 @@ def make_handler(runtime: HopRuntime):
                 self.simple(413, {"error": {"type": "hop_error", "message": "body too large"}})
                 return
             request_body = self.rfile.read(length) if length else None
-            request = urllib.request.Request(url, data=request_body, method=self.command)
+            request = urllib.request.Request(url, data=request_body, method="POST")
             try:
                 for name, value in self.headers.items():
                     lower = name.lower()
@@ -581,29 +713,49 @@ def make_handler(runtime: HopRuntime):
                 content_type = response.headers.get("Content-Type", "")
                 transfer = (response.headers.get("Transfer-Encoding") or "").lower()
                 streaming = "text/event-stream" in content_type or "chunked" in transfer
+                if not streaming:
+                    try:
+                        payload = self._read_bounded(response, runtime.config.max_response_bytes)
+                    except HopError:
+                        error_code = "response_too_large"
+                        status = 502
+                        self.simple(502, {"error": {"type": "hop_error", "message": "upstream response too large"}})
+                        return
+                    self.send_response(status)
+                    if content_type:
+                        self.send_header("Content-Type", content_type)
+                    if request_id:
+                        self.send_header("X-Request-Id", request_id)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    try:
+                        self.wfile.write(payload)
+                    except (BrokenPipeError, ConnectionAbortedError):
+                        LOG.info("client disconnected from streamed response")
+                    return
                 self.send_response(status)
                 if content_type:
                     self.send_header("Content-Type", content_type)
                 if request_id:
                     self.send_header("X-Request-Id", request_id)
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
                 try:
-                    if streaming:
-                        self.send_header("Cache-Control", "no-cache")
-                        self.send_header("Transfer-Encoding", "chunked")
-                        self.end_headers()
-                        while True:
-                            chunk = response.read(8192)
-                            if not chunk:
-                                break
-                            self.wfile.write(("%x\r\n" % len(chunk)).encode("ascii") + chunk + b"\r\n")
-                            self.wfile.flush()
-                        self.wfile.write(b"0\r\n\r\n")
+                    total = 0
+                    while True:
+                        chunk = response.read(8192)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > runtime.config.max_response_bytes:
+                            error_code = "response_too_large"
+                            status = 502
+                            break
+                        self.wfile.write(("%x\r\n" % len(chunk)).encode("ascii") + chunk + b"\r\n")
                         self.wfile.flush()
-                    else:
-                        payload = response.read()
-                        self.send_header("Content-Length", str(len(payload)))
-                        self.end_headers()
-                        self.wfile.write(payload)
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
                 except (BrokenPipeError, ConnectionAbortedError):
                     LOG.info("client disconnected from streamed response")
             finally:
@@ -617,8 +769,12 @@ def make_handler(runtime: HopRuntime):
                 except Exception:
                     pass
 
-        def do_GET(self) -> None:  # noqa: N802
-            if self.path.split("?", 1)[0] == "/healthz":
+        def _dispatch(self) -> None:
+            raw = self.path or ""
+            if any(ch in raw for ch in "\r\n\0"):
+                self.simple(400, {"error": {"type": "hop_error", "message": "unsafe request path"}})
+                return
+            if self.command == "GET" and raw == "/healthz":
                 bound = runtime.config.listen_port
                 try:
                     bound = int(self.server.server_address[1])
@@ -627,19 +783,31 @@ def make_handler(runtime: HopRuntime):
                 payload = health_payload(runtime, bound_port=bound)
                 self.simple(200 if payload.get("ok") is True else 503, payload)
                 return
+            if self.command != "POST":
+                self.simple(405, {"error": {"type": "hop_error", "message": "method not allowed"}})
+                return
+            if raw != runtime.config.endpoint_path:
+                self.simple(404, {"error": {"type": "hop_error", "message": "not found"}})
+                return
             self.relay()
+
+        def do_GET(self) -> None:  # noqa: N802
+            self._dispatch()
 
         def do_POST(self) -> None:  # noqa: N802
-            self.relay()
+            self._dispatch()
 
         def do_DELETE(self) -> None:  # noqa: N802
-            self.relay()
+            self._dispatch()
 
         def do_PATCH(self) -> None:  # noqa: N802
-            self.relay()
+            self._dispatch()
 
         def do_PUT(self) -> None:  # noqa: N802
-            self.relay()
+            self._dispatch()
+
+        def do_HEAD(self) -> None:  # noqa: N802
+            self._dispatch()
 
     return Handler
 

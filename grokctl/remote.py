@@ -12,12 +12,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Dict, Iterator, Mapping, Optional, Tuple
 
 
 PRODUCTION_SUPERVISOR_COMMAND = Path("/tmp/sand-supervisor/command.json")
@@ -53,16 +54,51 @@ def isoformat_z(dt: datetime) -> str:
 
 def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o644) -> None:
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    tmp = parent / (".%s.%s.tmp" % (path.name, uuid.uuid4().hex))
+    fd = None
+    replaced = False
     try:
-        os.write(fd, data)
+        fd = os.open(str(tmp), flags, 0o600)
+        view = memoryview(data) if data else memoryview(b"")
+        offset = 0
+        while offset < len(data):
+            written = os.write(fd, view[offset:])
+            if written <= 0:
+                raise OSError("short write")
+            offset += written
         os.fsync(fd)
-    finally:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, mode)
         os.close(fd)
-    os.replace(str(tmp), str(path))
-    os.chmod(str(path), mode)
+        fd = None
+        if not hasattr(os, "fchmod"):
+            os.chmod(str(tmp), mode)
+        os.replace(str(tmp), str(path))
+        replaced = True
+        try:
+            dirfd = os.open(str(parent), os.O_RDONLY)
+            try:
+                os.fsync(dirfd)
+            finally:
+                os.close(dirfd)
+        except OSError:
+            pass
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if not replaced:
+            try:
+                os.unlink(str(tmp))
+            except OSError:
+                pass
 
 
 def atomic_write_text(path: Path, text: str, mode: int = 0o644) -> None:
@@ -75,6 +111,86 @@ def atomic_write_json(path: Path, payload: object, mode: int = 0o644) -> None:
 
 def load_json(path: Path) -> object:
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def contained_secret_path(root: Path, secret_ref: str) -> Path:
+    """Lexically join a secret ref under root. Never resolve the final path."""
+
+    if not secret_ref or any(ch in secret_ref for ch in "\r\n\0"):
+        raise HostError("invalid secret reference", "invalid_secret")
+    rel = Path(secret_ref)
+    if rel.is_absolute() or not rel.parts:
+        raise HostError("invalid secret reference", "invalid_secret")
+    root = Path(root)
+    if root.exists() and root.is_symlink():
+        raise HostError("secrets root must not be a symlink", "invalid_secret")
+    current = root
+    for index, part in enumerate(rel.parts):
+        if part in ("", ".", "..") or "/" in part or "\\" in part:
+            raise HostError("invalid secret reference", "invalid_secret")
+        current = current / part
+        try:
+            current.relative_to(root)
+        except ValueError as exc:
+            raise HostError("invalid secret reference", "invalid_secret") from exc
+        if current.is_symlink():
+            raise HostError("secret path must not contain a symlink", "invalid_secret")
+        if index < len(rel.parts) - 1 and current.exists() and not current.is_dir():
+            raise HostError("invalid secret reference", "invalid_secret")
+    return current
+
+
+def iter_secret_files(root: Path) -> Iterator[Path]:
+    root = Path(root)
+    if not root.exists():
+        return
+    if root.is_symlink():
+        raise HostError("secrets root must not be a symlink", "invalid_secret")
+    for dirpath, dirnames, filenames in os.walk(str(root), followlinks=False):
+        base = Path(dirpath)
+        if base.is_symlink():
+            raise HostError("secret snapshot contains a symlink", "invalid_secret")
+        for name in dirnames:
+            child = base / name
+            if child.is_symlink():
+                raise HostError("secret snapshot contains a symlink", "invalid_secret")
+        for name in filenames:
+            child = base / name
+            if child.is_symlink():
+                raise HostError("secret snapshot contains a symlink", "invalid_secret")
+            try:
+                info = child.lstat()
+            except OSError as exc:
+                raise HostError("secret snapshot is unreadable", "invalid_secret") from exc
+            if not stat.S_ISREG(info.st_mode):
+                raise HostError("secret snapshot contains a non-regular file", "invalid_secret")
+            if stat.S_IMODE(info.st_mode) & 0o077:
+                raise HostError("secret snapshot has unsafe permissions", "invalid_secret")
+            yield child
+
+
+def read_regular_nofollow(path: Path, max_bytes: int = 64 * 1024) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(path), flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise HostError("secret must be a direct regular file", "invalid_secret")
+        if info.st_size > max_bytes:
+            raise HostError("secret exceeds size limit", "invalid_secret")
+        chunks = []
+        remaining = int(info.st_size)
+        while remaining > 0:
+            chunk = os.read(fd, min(8192, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 @dataclass
@@ -333,6 +449,7 @@ class HostRuntime:
     clock: Clock
     ids: UuidSource
     receipts_enabled: bool = True
+    fail_restore: bool = False
 
     def is_busy(self) -> bool:
         return self.layout.busy_signal_path.exists()
@@ -379,16 +496,7 @@ class HostRuntime:
         return int(raw)
 
     def secret_path(self, secret_ref: str) -> Path:
-        if not secret_ref or any(ch in secret_ref for ch in "\r\n\0"):
-            raise HostError("invalid secret reference", "invalid_secret")
-        rel = Path(secret_ref)
-        if rel.is_absolute() or ".." in rel.parts:
-            raise HostError("invalid secret reference", "invalid_secret")
-        path = (self.layout.secrets_dir / rel).resolve()
-        secrets_root = self.layout.secrets_dir.resolve()
-        if secrets_root not in path.parents and path != secrets_root:
-            raise HostError("invalid secret reference", "invalid_secret")
-        return path
+        return contained_secret_path(self.layout.secrets_dir, secret_ref)
 
     def inspect_secret(self, secret_ref: str) -> Dict[str, object]:
         hop = load_provider_hop()
@@ -435,14 +543,12 @@ class HostRuntime:
         secrets_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(str(secrets_dir), 0o700)
         if self.layout.secrets_dir.exists():
-            for path in sorted(self.layout.secrets_dir.rglob("*")):
-                if path.is_symlink() or not path.is_file():
-                    continue
+            for path in sorted(iter_secret_files(self.layout.secrets_dir)):
                 rel = path.relative_to(self.layout.secrets_dir)
                 dest = secrets_dir / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                atomic_write_bytes(dest, path.read_bytes(), mode=0o600)
-                os.chmod(str(dest), 0o600)
+                data = read_regular_nofollow(path)
+                atomic_write_bytes(dest, data, mode=0o600)
         hop_pid = self.read_hop_pid()
         hop_meta = {
             "hopPid": hop_pid,
@@ -461,6 +567,8 @@ class HostRuntime:
         return target
 
     def restore_snapshot(self, snapshot: Path) -> None:
+        if self.fail_restore:
+            raise HostError("snapshot restore failed", "rollback_failed")
         snapshot = Path(snapshot)
         if not snapshot.is_dir():
             raise HostError("snapshot is missing", "rollback_failed")

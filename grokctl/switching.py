@@ -284,22 +284,25 @@ class ActivationReceipt:
 
 @dataclass(frozen=True)
 class ProfileCatalog:
-    profiles: Tuple[Tuple[str, Tuple[Tuple[str, object], ...]], ...] = ()
+    profiles: Tuple[Tuple[str, str], ...] = ()
 
     @classmethod
     def from_mapping(cls, profiles: Mapping[str, Mapping[str, object]]) -> "ProfileCatalog":
         items = []
         for key, value in profiles.items():
             normalized = normalize_profile(value)
-            items.append((str(key), tuple(sorted(normalized.items(), key=lambda pair: pair[0]))))
+            profile_id = str(normalized.get("id") or "")
+            if str(key) != profile_id:
+                raise SwitchError("profile mapping key must match id", "invalid_profile")
+            items.append((profile_id, canonical_json(normalized)))
         return cls(tuple(items))
 
     def get(self, profile_id: str) -> Dict[str, object]:
         if profile_id == OFFICIAL_ID:
-            return dict(OFFICIAL_PROFILE)
-        for key, items in self.profiles:
+            return json.loads(canonical_json(OFFICIAL_PROFILE))
+        for key, blob in self.profiles:
             if key == profile_id:
-                return dict(items)
+                return json.loads(blob)
         raise SwitchError("unknown profile", "invalid_profile", {"profileId": profile_id})
 
 
@@ -503,8 +506,10 @@ class SwitchEngine:
             return receipt
         except Exception as exc:
             wrapped = _wrap(exc)
+            if wrapped.code == "rollback_failed":
+                raise wrapped
             if not restart_issued:
-                self._cleanup_pre_restart(plan, snapshot_written, hop_started_pid)
+                self._cleanup_pre_restart(plan, snapshot_written, hop_started_pid, wrapped)
                 raise wrapped
             self._rollback_once(plan, wrapped)
             raise wrapped
@@ -687,26 +692,63 @@ class SwitchEngine:
             }
         )
 
+    def _assert_restored(self, plan: ActivationPlan) -> None:
+        observed = self.host.observe()
+        snap = plan.previous_snapshot
+        if observed.bundle_digest != snap.bundle_digest:
+            raise SwitchError("restored bundle does not match snapshot", "rollback_failed")
+        if observed.profile_id != snap.profile_id:
+            raise SwitchError("restored profile does not match snapshot", "rollback_failed")
+        if int(observed.generation) != int(snap.generation):
+            raise SwitchError("restored generation does not match snapshot", "rollback_failed")
+
     def _cleanup_pre_restart(
         self,
         plan: ActivationPlan,
         snapshot_written: bool,
         hop_started_pid: Optional[int],
+        cause: SwitchError,
     ) -> None:
+        evidence = {
+            "transactionId": plan.transaction_id,
+            "previousProfile": plan.previous_profile,
+            "target": plan.target,
+            "snapshotDir": plan.staged_paths.snapshot,
+            "cause": cause.code,
+            "restoreProven": False,
+        }
+        hop_stop_failed = False
         if hop_started_pid is not None:
             try:
                 self.host.stop_pid(hop_started_pid, self.host.layout.hop_cmdline_token)
-            except (HostError, SwitchError):
-                pass
+            except Exception:
+                hop_stop_failed = True
+                evidence["hopPidLingering"] = hop_started_pid
         if snapshot_written:
             try:
                 self.host.restore_snapshot(Path(plan.staged_paths.snapshot))
-            except (HostError, OSError):
-                pass
+                self._assert_restored(plan)
+                evidence["restoreProven"] = True
+            except Exception as exc:
+                wrapped = _wrap(exc)
+                evidence["restoreError"] = wrapped.code
+                raise SwitchError(
+                    "pre-restart cleanup could not restore the previous snapshot",
+                    "rollback_failed",
+                    evidence,
+                ) from exc
         try:
             self.host.remove_staging(plan.generation)
         except OSError:
-            pass
+            evidence["stagingCleanup"] = "failed"
+        if hop_stop_failed:
+            evidence["hopStopFailed"] = True
+            raise SwitchError(
+                "pre-restart cleanup could not stop the started hop",
+                "rollback_failed",
+                evidence,
+            )
+        cause.evidence.update(evidence)
 
     def _rollback_once(self, plan: ActivationPlan, cause: SwitchError) -> None:
         evidence = {
@@ -737,6 +779,3 @@ class SwitchEngine:
             cause.code,
             evidence,
         )
-
-
-

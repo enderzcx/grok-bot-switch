@@ -19,8 +19,10 @@ if str(ROOT) not in sys.path:
 from grokctl.remote import (  # noqa: E402
     SequenceUuid,
     SyntheticProcessGateway,
+    atomic_write_bytes,
     atomic_write_text,
     build_runtime,
+    load_provider_hop,
     sha256_file,
 )
 from grokctl.switching import (  # noqa: E402
@@ -50,6 +52,9 @@ def file_tree(root: Path):
 
 class SwitchTransactionTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._hop = load_provider_hop()
+        self._previous_resolver = self._hop.get_host_resolver()
+        self._hop.set_host_resolver(lambda host: ("8.8.8.8",))
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.stock = self.root / "artifacts" / "stock.cjs"
@@ -90,6 +95,7 @@ class SwitchTransactionTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+        self._hop.set_host_resolver(self._previous_resolver)
 
     def _write_secret(self, secret_ref: str, value: str) -> Path:
         path = self.runtime.secret_path(secret_ref)
@@ -325,6 +331,93 @@ class SwitchTransactionTests(unittest.TestCase):
             self.engine.plan("other-profile")
         self.assertEqual(ctx.exception.code, "invalid_secret")
         self.assertEqual(self.runtime.load_state()["activeProfile"], "custom-openai")
+
+    def test_atomic_write_does_not_follow_predictable_tmp_symlink(self) -> None:
+        target = self.root / "atomic-target"
+        target.write_bytes(b"old-bytes")
+        canary = self.root / "atomic-canary"
+        canary.write_bytes(b"canary-secret")
+        predictable = self.root / "atomic-target.tmp"
+        predictable.symlink_to(canary)
+        atomic_write_bytes(target, b"new-bytes")
+        self.assertEqual(target.read_bytes(), b"new-bytes")
+        self.assertEqual(canary.read_bytes(), b"canary-secret")
+        self.assertTrue(predictable.is_symlink())
+
+    def test_atomic_write_failed_replace_leaves_previous_target(self) -> None:
+        target = self.root / "atomic-fail-target"
+        target.write_bytes(b"previous")
+        canary = self.root / "atomic-fail-canary"
+        canary.write_bytes(b"untouched")
+        predictable = self.root / "atomic-fail-target.tmp"
+        predictable.symlink_to(canary)
+        original = os.replace
+
+        def boom(_src, _dst):
+            raise OSError("injected replace failure")
+
+        os.replace = boom
+        try:
+            with self.assertRaises(OSError):
+                atomic_write_bytes(target, b"should-not-land")
+        finally:
+            os.replace = original
+        self.assertEqual(target.read_bytes(), b"previous")
+        self.assertEqual(canary.read_bytes(), b"untouched")
+        self.assertTrue(predictable.is_symlink())
+        leftovers = list(self.root.glob(".atomic-fail-target.*.tmp"))
+        self.assertEqual(leftovers, [])
+
+    def test_restore_failure_raises_rollback_failed(self) -> None:
+        plan = self.engine.plan("custom-openai")
+        self.runtime.fail_restore = True
+        self.runtime.processes.fail_hop_start = True
+        with self.assertRaises(SwitchError) as ctx:
+            self.engine.apply(plan, apply=True)
+        self.assertEqual(ctx.exception.code, "rollback_failed")
+        self.assertEqual(ctx.exception.evidence.get("cause"), "hop_start_failed")
+        self.assertFalse(ctx.exception.evidence.get("restoreProven"))
+
+    def test_same_root_secret_symlink_is_rejected(self) -> None:
+        path = self.runtime.secret_path("profile/custom-openai")
+        other = self.runtime.secret_path("profile/other-profile")
+        path.unlink()
+        path.symlink_to(other)
+        with self.assertRaises(SwitchError) as ctx:
+            self.engine.plan("custom-openai")
+        self.assertEqual(ctx.exception.code, "invalid_secret")
+
+    def test_unsafe_secret_in_tree_fails_snapshot(self) -> None:
+        junk = self.layout.secrets_dir / "junk-link"
+        junk.symlink_to(self.runtime.secret_path("profile/other-profile"))
+        plan = self.engine.plan("custom-openai")
+        with self.assertRaises(SwitchError) as ctx:
+            self.engine.apply(plan, apply=True)
+        self.assertEqual(ctx.exception.code, "invalid_secret")
+        self.assertEqual(self._active_bundle(), self.stock_digest)
+        self.assertEqual(self.runtime.load_state()["activeProfile"], "official")
+
+    def test_catalog_rejects_key_id_mismatch(self) -> None:
+        with self.assertRaises(SwitchError) as ctx:
+            ProfileCatalog.from_mapping({"wrong-key": load_profile("profile-custom-openai.json")})
+        self.assertEqual(ctx.exception.code, "invalid_profile")
+
+    def test_catalog_isolates_nested_caller_mutation(self) -> None:
+        payload = load_profile("profile-custom-openai.json")
+        catalog = ProfileCatalog.from_mapping(
+            {
+                "custom-openai": payload,
+                "other-profile": load_profile("profile-other.json"),
+            }
+        )
+        payload["id"] = "mutated"
+        payload["auth"]["type"] = "none"
+        got = catalog.get("custom-openai")
+        got["id"] = "changed"
+        got["auth"]["type"] = "none"
+        again = catalog.get("custom-openai")
+        self.assertEqual(again["id"], "custom-openai")
+        self.assertEqual(again["auth"]["type"], "bearer")
 
 
 if __name__ == "__main__":

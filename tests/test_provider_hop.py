@@ -47,6 +47,7 @@ class UpstreamHandler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _record(self, body: bytes) -> None:
+        self.server.contact_count = int(getattr(self.server, "contact_count", 0)) + 1
         self.server.requests.append(
             {
                 "path": self.path,
@@ -73,6 +74,14 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", self.server.evil_url)
             self.end_headers()
+            return
+        if self.path.startswith("/large"):
+            payload = b"X" * 100
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
             return
         if self.path.startswith("/stream"):
             chunks = [
@@ -131,6 +140,8 @@ def opener():
 
 class HopTestCase(unittest.TestCase):
     def setUp(self) -> None:
+        self._previous_resolver = HOP.get_host_resolver()
+        HOP.set_host_resolver(lambda host: ("8.8.8.8",))
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.secret_path = self.root / "secret"
@@ -139,6 +150,7 @@ class HopTestCase(unittest.TestCase):
         self.receipt_path = self.root / "receipts.jsonl"
         self.upstream, self.upstream_thread = start_http(UpstreamHandler)
         self.upstream.requests = []
+        self.upstream.contact_count = 0
         self.evil, self.evil_thread = start_http(EvilHandler)
         self.evil.hits = []
         self.upstream.evil_url = "http://127.0.0.1:%d/stolen" % self.evil.server_address[1]
@@ -153,6 +165,7 @@ class HopTestCase(unittest.TestCase):
         self.evil.shutdown()
         self.evil.server_close()
         self.tmp.cleanup()
+        HOP.set_host_resolver(self._previous_resolver)
 
     def _write_config(self, **overrides: object) -> Path:
         upstream_port = int(self.upstream.server_address[1])
@@ -366,7 +379,16 @@ class HopTestCase(unittest.TestCase):
             HOP.validate_endpoint("https://api.example.com/v1#frag")
         with self.assertRaises(HOP.HopError):
             HOP.validate_endpoint("ftp://127.0.0.1/v1")
+        with self.assertRaises(HOP.HopError):
+            HOP.validate_endpoint("https://10.0.0.1/v1")
+        with self.assertRaises(HOP.HopError):
+            HOP.validate_endpoint("https://169.254.1.1/v1")
+        with self.assertRaises(HOP.HopError):
+            HOP.validate_endpoint("https://224.0.0.1/v1")
+        with self.assertRaises(HOP.HopError):
+            HOP.validate_endpoint("https://0.0.0.0/v1")
         HOP.validate_endpoint("http://127.0.0.1:9/v1/chat/completions")
+        HOP.validate_endpoint("https://8.8.8.8/v1/chat/completions")
         HOP.validate_endpoint("https://api.example.com/v1/chat/completions")
         with self.assertRaises(HOP.HopError):
             HOP.load_runtime(self._write_config(listenHost="0.0.0.0"))
@@ -374,6 +396,71 @@ class HopTestCase(unittest.TestCase):
             HOP.load_runtime(
                 self._write_config(resolvedEndpoint="http://example.com/v1/chat/completions", endpointPath="/v1/chat/completions")
             )
+
+    def test_hostname_resolving_to_private_ip_is_rejected(self) -> None:
+        HOP.set_host_resolver(lambda host: ("10.1.2.3",))
+        with self.assertRaises(HOP.HopError):
+            HOP.validate_endpoint("https://evil.example/v1/chat/completions")
+        HOP.set_host_resolver(lambda host: ("8.8.8.8",))
+        HOP.validate_endpoint("https://ok.example/v1/chat/completions")
+
+    def test_alternate_paths_queries_and_methods_do_not_contact_upstream(self) -> None:
+        base = self._start_hop()
+        self.assertEqual(self.upstream.contact_count, 0)
+        status, _body, _headers = self._request(base + "/healthz")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.upstream.contact_count, 0)
+        for method in ("GET", "DELETE", "PATCH", "PUT", "HEAD"):
+            status, _body, _headers = self._request(base + "/v1/chat/completions", method=method)
+            self.assertEqual(status, 405, method)
+        self.assertEqual(self.upstream.contact_count, 0)
+        status, _body, _headers = self._request(base + "/v1/models", data=b"{}", headers={"Content-Type": "application/json"})
+        self.assertEqual(status, 404)
+        status, _body, _headers = self._request(
+            base + "/v1/chat/completions?redirect=http://evil",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(self.upstream.contact_count, 0)
+        status, _body, _headers = self._request(
+            base + "/v1/chat/completions",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(self.upstream.contact_count, 1)
+        self.assertEqual(self.upstream.requests[-1]["path"], "/v1/chat/completions")
+
+    def test_non_streaming_response_is_bounded(self) -> None:
+        port = int(self.upstream.server_address[1])
+        base = self._start_hop(
+            resolvedEndpoint="http://127.0.0.1:%d/large" % port,
+            endpointPath="/large",
+            maxResponseBytes=16,
+        )
+        status, body, _headers = self._request(base + "/large", data=b"x")
+        self.assertEqual(status, 502)
+        self.assertIn(b"too large", body)
+        self.assertEqual(self.upstream.contact_count, 1)
+
+    def test_hop_config_and_receipt_are_owner_only(self) -> None:
+        path = self._write_config()
+        os.chmod(path, 0o644)
+        with self.assertRaises(HOP.HopError):
+            HOP.load_config(path)
+        os.chmod(path, 0o600)
+        self.receipt_path.write_text("", encoding="utf-8")
+        os.chmod(self.receipt_path, 0o644)
+        with self.assertRaises(HOP.HopError):
+            HOP.load_config(path)
+        os.chmod(self.receipt_path, 0o600)
+        HOP.load_config(path)
+        base = self._start_hop()
+        self._request(base + "/v1/chat/completions", data=b"{}")
+        self._wait_receipt()
+        mode = self.receipt_path.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o600)
 
     def test_secret_must_be_private_regular_file(self) -> None:
         os.chmod(self.secret_path, 0o644)
