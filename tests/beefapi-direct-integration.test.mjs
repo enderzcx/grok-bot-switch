@@ -141,6 +141,7 @@ test("real wire and session sources compose into an external-only streamed turn"
   assert.equal(fetches[0].url, "http://127.0.0.1:18779/v1/chat/completions");
   assert.equal(fetches[0].init.headers.Authorization, undefined);
   assert.equal(fetches[0].init.headers.authorization, undefined);
+  assert.equal(fetches[0].init.headers["x-grok-request-kind"], "main");
   const body = JSON.parse(fetches[0].init.body);
   assert.equal(body.model, "grok-4.6");
   assert.equal(body.max_tokens, 64);

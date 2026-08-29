@@ -73,6 +73,18 @@ function beefApiDirectHeader(response, name) {
   return direct == null || direct === "" ? null : String(direct);
 }
 
+function beefApiDirectRequestKind(sessionOptions) {
+  var options = sessionOptions || {};
+  if (options.requestSource === "compaction") return "compaction";
+  if (options.isSummarizationSession === true) return "summary";
+  if (options.requestSource === "label") return "label";
+  if (options.requestSource === "review") return "review";
+  if (options.isComputerUseSubagent === true) return "computer";
+  if (options.isBrowserUseSubagent === true) return "browser";
+  if (options.modelId != null || options.lineage != null) return "subagent";
+  return "main";
+}
+
 function beefApiDirectDecoderChunks(result, where) {
   if (result == null) return [];
   if (Array.isArray(result)) return result;
@@ -358,7 +370,8 @@ function streamBeefApiDirect(executor, ctx, invocationId, tools, options) {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          accept: "text/event-stream"
+          accept: "text/event-stream",
+          "x-grok-request-kind": beefApiDirectRequestKind(executor._beefApiDirectSession.sessionOptions)
         },
         body: JSON.stringify(body),
         signal: signal

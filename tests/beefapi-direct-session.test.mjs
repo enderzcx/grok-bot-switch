@@ -586,6 +586,15 @@ test("all session option categories select direct mode and never call stock", ()
   assert.equal(labelingCalls.length, 0);
 });
 
+test("maps every session option category to an auditable request kind", () => {
+  const mod = withActiveConfig();
+  const expected = ["main", "summary", "compaction", "label", "review", "computer", "browser", "subagent"];
+  assert.deepEqual(
+    SESSION_OPTION_CASES.map(([, options]) => mod.context.beefApiDirectRequestKind(options)),
+    expected
+  );
+});
+
 test("inactive config preserves stock session and labeling", () => {
   const stockCalls = [];
   const labelingCalls = [];
