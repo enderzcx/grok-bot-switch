@@ -170,6 +170,9 @@ function loadModule(overrides = {}) {
     Uint8Array,
     ArrayBuffer,
     URL,
+    AbortController,
+    setTimeout,
+    clearTimeout,
     BasePromptBuilder,
     BasePromptExecutor,
     require(id) {
@@ -701,7 +704,8 @@ test("non-2xx rejects every promise, yields error, and never calls stock", async
   const executor = wrapped.createSession(() => {}, { requestSource: "main" }).getExecutor([{ role: "user", content: "hi" }]);
   const consumed = await consume(executor.stream({}, "inv-502", []));
   assertAllRejected(consumed, "non-2xx must fail closed");
-  assert.match(String(consumed.streamError), /502|bad gateway/);
+  assert.match(String(consumed.streamError), /502/);
+  assert.equal(String(consumed.streamError).includes("bad gateway"), false);
   assert.equal(stockCalls.length, 0);
   assert.equal(mod.fetches.length, 1);
 });
@@ -835,6 +839,149 @@ test("POSTs at the exact configured endpointPath", async () => {
   assert.equal(mod.fetches[0].url, "http://127.0.0.1:18779/v1/custom/chat");
   assert.equal(mod.fetches[0].init.method, "POST");
 });
+
+test("documents finite host-to-hop byte and deadline constants", () => {
+  const mod = withActiveConfig();
+  assert.equal(mod.context.PROVIDER_DIRECT_MAX_RESPONSE_BYTES, 64 * 1024 * 1024);
+  assert.equal(mod.context.PROVIDER_DIRECT_MAX_SSE_EVENT_BYTES, 1 * 1024 * 1024);
+  assert.equal(mod.context.PROVIDER_DIRECT_MAX_FAILURE_BODY_BYTES, 8 * 1024);
+  assert.equal(mod.context.PROVIDER_DIRECT_REQUEST_TIMEOUT_MS, 120000);
+});
+
+test("oversized successful SSE rejects, cancels the reader, and never calls stock", async () => {
+  const stockCalls = [];
+  const tracking = cancellableBody([
+    new TextEncoder().encode("data: {\"choices\":[{\"delta\":{\"content\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}]}\n\n"),
+    new TextEncoder().encode("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n"),
+    new TextEncoder().encode("data: [DONE]\n\n")
+  ]);
+  const mod = withActiveConfig({
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      headers: headerBag({ "content-type": "text/event-stream" }),
+      body: tracking.body
+    })
+  });
+  mod.context.PROVIDER_DIRECT_MAX_RESPONSE_BYTES = 80;
+  const wrapped = mod.wrapHostInferenceWithProviderSwitcher({
+    createSession(...args) {
+      stockCalls.push(args);
+      throw new Error("stock factory must not run");
+    }
+  });
+  const consumed = await consume(wrapped.createSession(() => {}, {}).getExecutor([{ role: "user", content: "hi" }]).stream({}, "inv-oversize", []));
+  assertAllRejected(consumed, "oversized SSE must fail closed");
+  assert.match(String(consumed.streamError), /exceeded 80 bytes/);
+  assert.equal(tracking.cancelled, true);
+  assert.equal(stockCalls.length, 0);
+});
+
+test("a single never-delimited SSE event rejects without leaking payload", async () => {
+  const stockCalls = [];
+  const payload = `data: ${"x".repeat(80)}`;
+  const tracking = cancellableBody([new TextEncoder().encode(payload)]);
+  const mod = withActiveConfig({
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      headers: headerBag({ "content-type": "text/event-stream" }),
+      body: tracking.body
+    })
+  });
+  mod.context.PROVIDER_DIRECT_MAX_SSE_EVENT_BYTES = 32;
+  const wrapped = mod.wrapHostInferenceWithProviderSwitcher({
+    createSession(...args) {
+      stockCalls.push(args);
+      throw new Error("stock factory must not run");
+    }
+  });
+  const consumed = await consume(wrapped.createSession(() => {}, {}).getExecutor().stream({}, "inv-event", []));
+  assertAllRejected(consumed, "never-delimited SSE event must fail closed");
+  assert.match(String(consumed.streamError), /SSE event exceeded 32 bytes/);
+  assert.equal(String(consumed.streamError).includes("x".repeat(40)), false);
+  assert.equal(JSON.stringify(fromVm(consumed.events)).includes("x".repeat(40)), false);
+  assert.equal(tracking.cancelled, true);
+  assert.equal(stockCalls.length, 0);
+});
+
+test("oversized failure body fails closed without leaking a sentinel secret", async () => {
+  const stockCalls = [];
+  const SENTINEL = "sk-sentinel-leak-test-9f3a";
+  const tracking = cancellableBody([
+    new TextEncoder().encode(`{"error":{"message":"${SENTINEL} ${"n".repeat(40)}"}}`)
+  ]);
+  const mod = withActiveConfig({
+    fetchImpl: async () => ({
+      ok: false,
+      status: 502,
+      headers: headerBag({ "content-type": "application/json" }),
+      body: tracking.body
+    })
+  });
+  mod.context.PROVIDER_DIRECT_MAX_FAILURE_BODY_BYTES = 16;
+  const wrapped = mod.wrapHostInferenceWithProviderSwitcher({
+    createSession(...args) {
+      stockCalls.push(args);
+      throw new Error("stock factory must not run");
+    }
+  });
+  const consumed = await consume(wrapped.createSession(() => {}, {}).getExecutor([{ role: "user", content: "hi" }]).stream({}, "inv-fail-body", []));
+  assertAllRejected(consumed, "oversized failure body must fail closed");
+  const rendered = `${consumed.streamError}\n${JSON.stringify(fromVm(consumed.events))}`;
+  assert.equal(rendered.includes(SENTINEL), false);
+  assert.match(String(consumed.streamError), /failure body exceeded 16 bytes/);
+  assert.equal(tracking.cancelled, true);
+  assert.equal(stockCalls.length, 0);
+});
+
+test("host-to-hop deadline fails closed when ctx.signal is absent", async () => {
+  const stockCalls = [];
+  let sawHopSignal = false;
+  const mod = withActiveConfig({
+    fetchImpl: async (_url, init) => {
+      sawHopSignal = init.signal != null;
+      await new Promise((_resolve, reject) => {
+        if (init.signal == null) return;
+        if (init.signal.aborted) {
+          reject(providerAbort(init.signal));
+          return;
+        }
+        init.signal.addEventListener("abort", () => reject(providerAbort(init.signal)));
+      });
+    }
+  });
+  mod.context.PROVIDER_DIRECT_REQUEST_TIMEOUT_MS = 20;
+  const wrapped = mod.wrapHostInferenceWithProviderSwitcher({
+    createSession(...args) {
+      stockCalls.push(args);
+      throw new Error("stock factory must not run");
+    }
+  });
+  const consumed = await consume(wrapped.createSession(() => {}, {}).getExecutor().stream({}, "inv-timeout", []));
+  assertAllRejected(consumed, "timeout must fail closed");
+  assert.equal(sawHopSignal, true);
+  assert.match(String(consumed.streamError), /timed out/i);
+  assert.equal(consumed.streamError.name, "TimeoutError");
+  assert.equal(stockCalls.length, 0);
+});
+
+function cancellableBody(chunks) {
+  const state = { cancelled: false };
+  return {
+    get cancelled() {
+      return state.cancelled;
+    },
+    body: new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+      },
+      cancel() {
+        state.cancelled = true;
+      }
+    })
+  };
+}
 
 function providerAbort(signal) {
   if (signal?.reason instanceof Error) return signal.reason;

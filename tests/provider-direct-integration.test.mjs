@@ -67,6 +67,9 @@ function loadSession(config, fetchImpl) {
     Uint8Array,
     ArrayBuffer,
     URL,
+    AbortController,
+    setTimeout,
+    clearTimeout,
     crypto,
     fetch: async (url, init) => {
       fetches.push({ url, init });

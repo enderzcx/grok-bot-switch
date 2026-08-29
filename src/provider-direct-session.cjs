@@ -26,6 +26,11 @@ var PROVIDER_DIRECT_PROFILE_ID = /^(?:[a-z]|[a-z][a-z0-9-]{0,61}[a-z0-9])$/;
 var PROVIDER_DIRECT_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
 var PROVIDER_DIRECT_DIGEST = /^[a-f0-9]{64}$/;
 var PROVIDER_DIRECT_FORBIDDEN_HEADER = /^(authorization|proxy-authorization|cookie|set-cookie|host|content-length|connection|transfer-encoding|keep-alive|upgrade|te|trailer|x-api-key|api-key|x-auth-token)$/i;
+// Host-to-hop bounds. Finite, not configurable, independent of hop upstream caps.
+var PROVIDER_DIRECT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+var PROVIDER_DIRECT_MAX_SSE_EVENT_BYTES = 1 * 1024 * 1024;
+var PROVIDER_DIRECT_MAX_FAILURE_BODY_BYTES = 8 * 1024;
+var PROVIDER_DIRECT_REQUEST_TIMEOUT_MS = 120000;
 var ProviderDirectPromptExecutorCtor;
 var providerDirectProtocolRegistry;
 
@@ -43,6 +48,116 @@ function providerDirectAbortError(signal) {
   var error = new Error("Provider direct request aborted");
   error.name = "AbortError";
   return error;
+}
+
+function providerDirectTimeoutError() {
+  var error = new Error("Provider direct request timed out");
+  error.name = "TimeoutError";
+  return error;
+}
+
+function providerDirectResponseTooLargeError() {
+  return new Error("Provider direct response exceeded " + PROVIDER_DIRECT_MAX_RESPONSE_BYTES + " bytes");
+}
+
+function providerDirectSseEventTooLargeError() {
+  return new Error("Provider direct SSE event exceeded " + PROVIDER_DIRECT_MAX_SSE_EVENT_BYTES + " bytes");
+}
+
+function providerDirectFailureBodyTooLargeError() {
+  return new Error("Provider direct failure body exceeded " + PROVIDER_DIRECT_MAX_FAILURE_BODY_BYTES + " bytes");
+}
+
+function providerDirectLinkDeadline(userSignal) {
+  var controller = new AbortController();
+  var timer = setTimeout(function () {
+    try {
+      controller.abort(providerDirectTimeoutError());
+    } catch (_error) {
+      try {
+        controller.abort();
+      } catch (_abort) {}
+    }
+  }, PROVIDER_DIRECT_REQUEST_TIMEOUT_MS);
+  function onUserAbort() {
+    try {
+      controller.abort(providerDirectAbortError(userSignal));
+    } catch (_error) {
+      try {
+        controller.abort();
+      } catch (_abort) {}
+    }
+  }
+  if (userSignal != null) {
+    if (userSignal.aborted) {
+      onUserAbort();
+    } else if (typeof userSignal.addEventListener === "function") {
+      userSignal.addEventListener("abort", onUserAbort);
+    }
+  }
+  return {
+    signal: controller.signal,
+    dispose: function () {
+      if (timer != null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (userSignal != null && typeof userSignal.removeEventListener === "function") {
+        userSignal.removeEventListener("abort", onUserAbort);
+      }
+    }
+  };
+}
+
+function providerDirectCreateResponseBounds() {
+  var total = 0;
+  var pending = 0;
+  var prev1 = 0;
+  var prev2 = 0;
+  var prev3 = 0;
+  return {
+    observe: function (bytes) {
+      var length = bytes.length;
+      if (length > PROVIDER_DIRECT_MAX_RESPONSE_BYTES || total > PROVIDER_DIRECT_MAX_RESPONSE_BYTES - length) {
+        throw providerDirectResponseTooLargeError();
+      }
+      total += length;
+      for (var i = 0; i < length; i += 1) {
+        var b = bytes[i];
+        pending += 1;
+        var delimited = b === 10 && (prev1 === 10 || (prev1 === 13 && prev2 === 10 && prev3 === 13));
+        prev3 = prev2;
+        prev2 = prev1;
+        prev1 = b;
+        if (delimited) {
+          pending = 0;
+        } else if (pending > PROVIDER_DIRECT_MAX_SSE_EVENT_BYTES) {
+          throw providerDirectSseEventTooLargeError();
+        }
+      }
+    }
+  };
+}
+
+async function providerDirectCancelResponse(response, reader) {
+  try {
+    if (reader != null && typeof reader.cancel === "function") {
+      await reader.cancel();
+      return;
+    }
+  } catch (_cancelReader) {}
+  var body = response == null ? null : response.body;
+  try {
+    if (body != null && typeof body.cancel === "function") {
+      await body.cancel();
+      return;
+    }
+  } catch (_cancelBody) {}
+  try {
+    if (body != null && typeof body.destroy === "function") {
+      body.destroy();
+    }
+  } catch (_destroy) {}
 }
 
 function providerDirectDeferred() {
@@ -187,24 +302,40 @@ function providerDirectCreatePump() {
 async function providerDirectForEachBodyChunk(response, signal, onChunk) {
   var body = response == null ? null : response.body;
   if (body == null) {
+    var whole;
     if (response != null && typeof response.arrayBuffer === "function") {
-      await onChunk(new Uint8Array(await response.arrayBuffer()));
-      return;
+      whole = new Uint8Array(await response.arrayBuffer());
+    } else if (response != null && typeof response.text === "function") {
+      whole = new TextEncoder().encode(await response.text());
+    } else {
+      throw new Error("Provider direct response body is not readable");
     }
-    if (response != null && typeof response.text === "function") {
-      await onChunk(new TextEncoder().encode(await response.text()));
-      return;
+    try {
+      await onChunk(whole);
+    } catch (error) {
+      await providerDirectCancelResponse(response, null);
+      throw error;
     }
-    throw new Error("Provider direct response body is not readable");
+    return;
   }
   if (typeof body.getReader === "function") {
     var reader = body.getReader();
     try {
       for (;;) {
-        if (signal != null && signal.aborted) throw providerDirectAbortError(signal);
+        if (signal != null && signal.aborted) {
+          await providerDirectCancelResponse(response, reader);
+          throw providerDirectAbortError(signal);
+        }
         var read = await reader.read();
         if (read.done) break;
-        if (read.value != null) await onChunk(providerDirectAsUint8Array(read.value));
+        if (read.value != null) {
+          try {
+            await onChunk(providerDirectAsUint8Array(read.value));
+          } catch (error) {
+            await providerDirectCancelResponse(response, reader);
+            throw error;
+          }
+        }
       }
     } finally {
       try {
@@ -214,26 +345,79 @@ async function providerDirectForEachBodyChunk(response, signal, onChunk) {
     return;
   }
   if (typeof body[Symbol.asyncIterator] === "function") {
-    for await (var nodeChunk of body) {
+    try {
+      for await (var nodeChunk of body) {
+        if (signal != null && signal.aborted) {
+          await providerDirectCancelResponse(response, null);
+          throw providerDirectAbortError(signal);
+        }
+        try {
+          await onChunk(providerDirectAsUint8Array(nodeChunk));
+        } catch (error) {
+          await providerDirectCancelResponse(response, null);
+          throw error;
+        }
+      }
+    } catch (error) {
       if (signal != null && signal.aborted) throw providerDirectAbortError(signal);
-      await onChunk(providerDirectAsUint8Array(nodeChunk));
+      throw error;
     }
     return;
   }
   throw new Error("Provider direct response body is not readable");
 }
 
-async function providerDirectReadFailureBody(response) {
-  try {
-    if (response == null) return "";
-    if (typeof response.arrayBuffer === "function") {
-      return new TextDecoder("utf-8").decode(new Uint8Array(await response.arrayBuffer()));
+async function providerDirectDrainFailureBody(response) {
+  if (response == null) return;
+  var limit = PROVIDER_DIRECT_MAX_FAILURE_BODY_BYTES;
+  var collected = 0;
+  var body = response.body;
+  function note(length) {
+    collected += length;
+    if (collected > limit) {
+      throw providerDirectFailureBodyTooLargeError();
     }
-    if (typeof response.text === "function") {
-      return await response.text();
+  }
+  if (body != null && typeof body.getReader === "function") {
+    var reader = body.getReader();
+    try {
+      for (;;) {
+        var read = await reader.read();
+        if (read.done) return;
+        var chunk = providerDirectAsUint8Array(read.value);
+        try {
+          note(chunk.length);
+        } catch (error) {
+          await providerDirectCancelResponse(response, reader);
+          throw error;
+        }
+      }
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch (_release) {}
     }
-  } catch (_error) {}
-  return "";
+    return;
+  }
+  if (body != null && typeof body[Symbol.asyncIterator] === "function") {
+    for await (var nodeChunk of body) {
+      var bytes = providerDirectAsUint8Array(nodeChunk);
+      try {
+        note(bytes.length);
+      } catch (error) {
+        await providerDirectCancelResponse(response, null);
+        throw error;
+      }
+    }
+    return;
+  }
+  if (typeof response.arrayBuffer === "function") {
+    note((await response.arrayBuffer()).byteLength);
+    return;
+  }
+  if (typeof response.text === "function") {
+    note((await response.text()).length);
+  }
 }
 
 function providerDirectReadConfigFile() {
@@ -598,8 +782,10 @@ function streamProviderDirect(executor, ctx, invocationId, tools, options) {
       }
     }
 
+    var deadline = providerDirectLinkDeadline(signal);
+    var hopSignal = deadline.signal;
     try {
-      if (signal != null && signal.aborted) throw providerDirectAbortError(signal);
+      if (hopSignal.aborted) throw providerDirectAbortError(hopSignal);
       var config = executor._providerDirectConfig;
       var adapter = getProviderProtocolRegistry().getAdapter(config.protocol);
       if (adapter == null || typeof adapter.buildRequest !== "function" || typeof adapter.createStreamDecoder !== "function") {
@@ -624,13 +810,19 @@ function streamProviderDirect(executor, ctx, invocationId, tools, options) {
       var headers = providerDirectCopyHeaders(adapterRequest.headers);
       headers["x-grok-request-kind"] = providerDirectRequestKind(executor._providerDirectSession.sessionOptions);
       var url = providerDirectJoinUrl(config.baseUrl, adapterRequest.path);
-      var response = await fetch(url, {
-        method: "POST",
-        headers: headers,
-        body: JSON.stringify(adapterRequest.body),
-        signal: signal
-      });
-      if (signal != null && signal.aborted) throw providerDirectAbortError(signal);
+      var response;
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers: headers,
+          body: JSON.stringify(adapterRequest.body),
+          signal: hopSignal
+        });
+      } catch (error) {
+        if (hopSignal.aborted) throw providerDirectAbortError(hopSignal);
+        throw error;
+      }
+      if (hopSignal.aborted) throw providerDirectAbortError(hopSignal);
       headerRequestId = providerDirectHeader(response, "x-request-id")
         || providerDirectHeader(response, "x-oneapi-request-id")
         || providerDirectHeader(response, "request-id");
@@ -639,17 +831,16 @@ function streamProviderDirect(executor, ctx, invocationId, tools, options) {
       }
       if (response == null || response.ok !== true || response.status < 200 || response.status > 299) {
         var status = response == null ? 0 : response.status;
-        var failureBody = await providerDirectReadFailureBody(response);
-        if (adapter.interpretHttpFailure != null) {
-          adapter.interpretHttpFailure(status, failureBody);
-        }
+        await providerDirectDrainFailureBody(response);
         throw new Error("Provider direct request failed with status " + status);
       }
       var decoder = adapter.createStreamDecoder({ requestId: headerRequestId || "" });
       if (decoder == null || typeof decoder.push !== "function" || typeof decoder.close !== "function") {
         throw new Error("Provider adapter createStreamDecoder must return { push, close }");
       }
-      await providerDirectForEachBodyChunk(response, signal, function (bytes) {
+      var bounds = providerDirectCreateResponseBounds();
+      await providerDirectForEachBodyChunk(response, hopSignal, function (bytes) {
+        bounds.observe(bytes);
         applyEvents(decoder.push(bytes), "push()");
       });
       applyEvents(decoder.close(), "close()");
@@ -715,6 +906,8 @@ function streamProviderDirect(executor, ctx, invocationId, tools, options) {
       invocationSlot.reject(err);
       responseSlot.reject(err);
       pump.fail(err);
+    } finally {
+      deadline.dispose();
     }
   })();
 
