@@ -621,17 +621,29 @@ test("malformed active config throws and never calls stock", () => {
   const mod = loadModule({
     files: { [CONFIG_PATH]: JSON.stringify({ ...ACTIVE_CONFIG, baseUrl: "https://example.com/v1" }) }
   });
-  const wrapped = mod.wrapHostInferenceWithBeefApiDirect({
-    createSession(...args) {
-      stockCalls.push(args);
-      return {};
-    },
-    recordPostTurnLabeling() {
-      stockCalls.push("label");
+  assert.throws(() => mod.wrapHostInferenceWithBeefApiDirect({
+    createSession(...args) { stockCalls.push(args); return {}; },
+    recordPostTurnLabeling() { stockCalls.push("label"); }
+  }), /invalid/);
+  assert.equal(stockCalls.length, 0);
+});
+
+test("locks direct mode for the host lifetime and never labels natively after config removal", () => {
+  let configPresent = true;
+  const stockCalls = [];
+  const mod = loadModule({
+    readFileSync() {
+      if (!configPresent) enoent();
+      return JSON.stringify(ACTIVE_CONFIG);
     }
   });
-  assert.throws(() => wrapped.createSession(() => {}, { requestSource: "review" }), /invalid/);
-  assert.throws(() => wrapped.recordPostTurnLabeling({ requestId: "r" }), /invalid/);
+  const wrapped = mod.wrapHostInferenceWithBeefApiDirect({
+    createSession(...args) { stockCalls.push(args); throw new Error("stock session must not run"); },
+    recordPostTurnLabeling(...args) { stockCalls.push(args); }
+  });
+  configPresent = false;
+  assert.equal(wrapped.createSession(() => {}, {}).getModelId(), "grok-4.6");
+  wrapped.recordPostTurnLabeling({ requestId: "r" });
   assert.equal(stockCalls.length, 0);
 });
 

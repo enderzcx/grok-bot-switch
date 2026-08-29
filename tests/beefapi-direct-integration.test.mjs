@@ -131,7 +131,7 @@ test("real wire and session sources compose into an external-only streamed turn"
     outputTokens: 4,
     cacheReadTokens: 2,
     cacheWriteTokens: 0,
-    maxTokens: 64
+    maxTokens: 0
   });
   assert.deepEqual(JSON.parse(JSON.stringify(await settle(result.providerMetadata))), {
     beefapiRequestId: "beefapi-request-1"

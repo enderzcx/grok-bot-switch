@@ -115,7 +115,7 @@ function beefApiDirectUsageFromFinish(event) {
   };
 }
 
-function beefApiDirectExtendedUsageFromFinish(event, usage, requestedMaxTokens) {
+function beefApiDirectExtendedUsageFromFinish(event, usage) {
   var extended = event == null ? null : event.extendedUsage;
   if (extended != null && typeof extended === "object") {
     return {
@@ -123,7 +123,7 @@ function beefApiDirectExtendedUsageFromFinish(event, usage, requestedMaxTokens) 
       outputTokens: Number(extended.outputTokens) || 0,
       cacheReadTokens: Number(extended.cacheReadTokens) || 0,
       cacheWriteTokens: Number(extended.cacheWriteTokens) || 0,
-      maxTokens: Number(extended.maxTokens) || Number(requestedMaxTokens) || 0
+      maxTokens: Number(extended.maxTokens) || 0
     };
   }
   if (usage == null) return null;
@@ -132,7 +132,7 @@ function beefApiDirectExtendedUsageFromFinish(event, usage, requestedMaxTokens) 
     outputTokens: usage.completionTokens,
     cacheReadTokens: Number(usage.cacheReadTokens) || 0,
     cacheWriteTokens: Number(usage.cacheWriteTokens) || 0,
-    maxTokens: Number(usage.maxTokens) || Number(requestedMaxTokens) || 0
+    maxTokens: Number(usage.maxTokens) || 0
   };
 }
 
@@ -268,28 +268,20 @@ function createBeefApiDirectPromptSession(options) {
 }
 
 function wrapHostInferenceWithBeefApiDirect(cursorInference, _options) {
+  var directConfig = loadBeefApiDirectConfig();
+  if (directConfig == null) {
+    return cursorInference;
+  }
   return {
     ...cursorInference,
     createSession: function (onRequestId, sessionOptions) {
-      var config = loadBeefApiDirectConfig();
-      if (config == null) {
-        return cursorInference.createSession(onRequestId, sessionOptions);
-      }
       return createBeefApiDirectPromptSession({
         onRequestId: onRequestId,
         sessionOptions: sessionOptions,
-        config: config
+        config: directConfig
       });
     },
-    recordPostTurnLabeling: function (args) {
-      var config = loadBeefApiDirectConfig();
-      if (config == null) {
-        if (typeof cursorInference.recordPostTurnLabeling === "function") {
-          return cursorInference.recordPostTurnLabeling(args);
-        }
-        return;
-      }
-    }
+    recordPostTurnLabeling: function (_args) {}
   };
 }
 
@@ -405,8 +397,7 @@ function streamBeefApiDirect(executor, ctx, invocationId, tools, options) {
       if (usage == null) {
         throw new Error("BeefAPI direct stream finished without usage");
       }
-      var requestedMaxTokens = options != null ? options.maxTokens : null;
-      var extendedUsage = beefApiDirectExtendedUsageFromFinish(finishEvent, usage, requestedMaxTokens);
+      var extendedUsage = beefApiDirectExtendedUsageFromFinish(finishEvent, usage);
       var requestId = headerRequestId
         || finishEvent.requestId
         || (finishEvent.response != null ? finishEvent.response.id : null);
