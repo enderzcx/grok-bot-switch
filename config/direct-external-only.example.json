@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "enabled": true,
+  "mode": "external-only",
+  "nativeFallback": false,
+  "provider": "beefapi",
+  "group": "grok",
+  "modelId": "grok-4.6",
+  "baseUrl": "http://127.0.0.1:18779/v1"
+}
