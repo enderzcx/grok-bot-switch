@@ -620,6 +620,10 @@ test("all session option categories select direct mode and never call stock", ()
     },
     recordPostTurnLabeling(...args) {
       labelingCalls.push(args);
+    },
+    recordFollowupLabeling() {
+      labelingCalls.push("native-followup");
+      throw new Error("NATIVE_FOLLOWUP_SENTINEL must not run");
     }
   });
   for (const [name, sessionOptions] of SESSION_OPTION_CASES) {
@@ -629,6 +633,7 @@ test("all session option categories select direct mode and never call stock", ()
   }
   assert.equal(stockCalls.length, 0);
   wrapped.recordPostTurnLabeling({ requestId: "r", conversationId: "c", modelName: "stock", messages: [{ role: "user", content: "secret" }] });
+  wrapped.recordFollowupLabeling({ requestId: "r", conversationId: "c", turnSeq: 2, messages: [{ role: "user", content: "private" }] });
   assert.equal(labelingCalls.length, 0);
 });
 
@@ -662,6 +667,22 @@ test("inactive config preserves stock session and labeling", () => {
   assert.equal(labelingCalls.length, 1);
 });
 
+test("inactive wrapper preserves native followup identity, arguments and receiver", () => {
+  for (const files of [{}, { [CONFIG_PATH]: JSON.stringify({ ...ACTIVE_CONFIG, enabled: false }) }]) {
+    const calls = [];
+    const native = {
+      createSession() {},
+      recordFollowupLabeling(...args) { calls.push({ receiver: this, args }); return "native-result"; }
+    };
+    const wrapped = loadModule({ files }).wrapHostInferenceWithProviderSwitcher(native);
+    const payload = { requestId: "r", turnSeq: 2, messages: [{ role: "user", content: "text" }] };
+    assert.equal(wrapped, native);
+    assert.equal(wrapped.recordFollowupLabeling, native.recordFollowupLabeling);
+    assert.equal(wrapped.recordFollowupLabeling(payload), "native-result");
+    assert.deepEqual(calls, [{ receiver: native, args: [payload] }]);
+  }
+});
+
 test("malformed active config throws and never calls stock", () => {
   const stockCalls = [];
   const mod = loadModule({
@@ -685,11 +706,17 @@ test("locks direct mode for the host lifetime and never labels natively after co
   });
   const wrapped = mod.wrapHostInferenceWithProviderSwitcher({
     createSession(...args) { stockCalls.push(args); throw new Error("stock session must not run"); },
-    recordPostTurnLabeling(...args) { stockCalls.push(args); }
+    recordPostTurnLabeling(...args) { stockCalls.push(args); },
+    recordFollowupLabeling(...args) {
+      stockCalls.push(args);
+      throw new Error("NATIVE_FOLLOWUP_SENTINEL must not run after activation");
+    }
   });
+  wrapped.recordFollowupLabeling({ requestId: "before-removal", turnSeq: 1 });
   configPresent = false;
   assert.equal(wrapped.createSession(() => {}, {}).getModelId(), "model-name");
   wrapped.recordPostTurnLabeling({ requestId: "r" });
+  wrapped.recordFollowupLabeling({ requestId: "after-removal", turnSeq: 2 });
   assert.equal(stockCalls.length, 0);
 });
 

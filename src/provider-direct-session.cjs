@@ -1,4 +1,4 @@
-// Injected into the 0.30 host bundle. Keep this file free of export assignments.
+// Injected into hash-pinned host bundles. Keep this file free of export assignments.
 // Protocol adapters are loaded from src/provider_protocols via Node require in
 // tests, or from the hash-fenced in-bundle registry after patching:
 //   getAdapter(protocol) -> { buildRequest, createStreamDecoder, interpretHttpFailure }
@@ -753,7 +753,10 @@ function wrapHostInferenceWithProviderSwitcher(cursorInference, _options) {
         config: directConfig
       });
     },
-    recordPostTurnLabeling: function (_args) {}
+    recordPostTurnLabeling: function (_args) {},
+    // 17184bb moved follow-up labeling outside createSession. Keep both native
+    // callbacks disabled for this activated host lifetime, even if config goes.
+    recordFollowupLabeling: function (_args) {}
   };
 }
 

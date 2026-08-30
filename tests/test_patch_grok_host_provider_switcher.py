@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -21,6 +22,9 @@ REAL_PROTOCOLS_DIR = ROOT / "src" / "provider_protocols"
 REAL_SESSION_PATH = ROOT / "src" / "provider-direct-session.cjs"
 STOCK_BUNDLE_PATH = Path(
     "/Users/sunny/Work/CODEX/grok_home/research/current-0.30/host-main.cjs"
+)
+CURRENT_HOST_PATH = Path(
+    "/Users/sunny/Work/CODEX/grok-bot-switch/runtime/windows-028-audit/host-main-17184bb.cjs"
 )
 CANONICAL_CONFIG = {
     "schemaVersion": 1,
@@ -370,11 +374,12 @@ class BackupAndFenceTests(unittest.TestCase):
                 idempotent=False,
                 input_counts=counts,
                 output_counts=counts,
+                recognized_stock_sha256=PATCHER.HOST_17184BB_SHA256,
             )
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
             original_sha = hashlib.sha256(original).hexdigest()
             self.assertEqual(payload["kind"], "grok-host-provider-switcher-backup")
-            self.assertEqual(payload["stockSha256Expected"], PATCHER.STOCK_SHA256)
+            self.assertEqual(payload["stockSha256Expected"], PATCHER.HOST_17184BB_SHA256)
             self.assertEqual(payload["input"]["sha256"], original_sha)
             self.assertEqual(payload["input"]["size"], len(original))
             self.assertEqual(payload["output"]["size"], len(patched.encode("utf-8")))
@@ -423,6 +428,48 @@ class BackupAndFenceTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 1)
             self.assertIn("stock SHA-256 mismatch", completed.stderr)
             self.assertFalse(output.exists())
+
+    def test_supported_stock_hashes_are_explicit(self):
+        self.assertEqual(PATCHER.SUPPORTED_STOCK_SHA256, frozenset((
+            "3c3f986e614aaf8fbec642269da40dd20f1dbd9912bdf8f2390bafd61ec684ef",
+            "0035c31a74ac9d7fc9d93532cf37e217d6074143d46b1eeb3c5e79699df2f88f",
+        )))
+
+    def test_idempotent_manifest_retains_stock_identity_and_unknown_base_rejects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stock = root / "stock.cjs"
+            session = root / "session.cjs"
+            stock.write_text(mini_bundle(), encoding="utf-8")
+            session.write_text(SESSION_SOURCE, encoding="utf-8")
+            protocols_dir = write_protocol_dir(root)
+            stock_sha = hashlib.sha256(stock.read_bytes()).hexdigest()
+            output, second = root / "out.cjs", root / "second.cjs"
+            with patch.object(PATCHER, "SUPPORTED_STOCK_SHA256", frozenset((stock_sha,))):
+                first = PATCHER.patch_host_bundle(stock, protocols_dir, session, output, root / "backup")
+                again = PATCHER.patch_host_bundle(output, protocols_dir, session, second, root / "backup")
+                self.assertTrue(again["idempotent"])
+                self.assertEqual(output.read_bytes(), second.read_bytes())
+                for report in (first, again):
+                    manifest = json.loads(Path(report["backupManifest"]).read_text())
+                    self.assertEqual(report["recognizedStockSha256"], stock_sha)
+                    self.assertEqual(manifest["stockSha256Expected"], stock_sha)
+                altered = root / "altered.cjs"
+                altered.write_bytes(output.read_bytes() + b"\n// unknown stock change\n")
+                with self.assertRaisesRegex(PATCHER.PatchError, "stock SHA-256 mismatch"):
+                    PATCHER.patch_host_bundle(altered, protocols_dir, session, root / "rejected.cjs", root / "rejected-backup")
+                self.assertFalse((root / "rejected.cjs").exists())
+                self.assertFalse((root / "rejected-backup").exists())
+
+    def test_marker_bearing_unknown_stock_cannot_bypass_hash_fence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stock, session = root / "stock.cjs", root / "session.cjs"
+            stock.write_text(PATCHER.apply_patch(mini_bundle(), mini_protocol_sources(), SESSION_SOURCE), encoding="utf-8")
+            session.write_text(SESSION_SOURCE, encoding="utf-8")
+            with self.assertRaisesRegex(PATCHER.PatchError, "stock SHA-256 mismatch"):
+                PATCHER.patch_host_bundle(stock, write_protocol_dir(root), session, root / "out.cjs", root / "backup")
+            self.assertFalse((root / "out.cjs").exists())
 
 
 class CanonicalConfigTests(unittest.TestCase):
@@ -503,6 +550,7 @@ class RealBundleTests(unittest.TestCase):
             manifest_path = Path(report["backupManifest"])
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["input"]["sha256"], PATCHER.STOCK_SHA256)
+            self.assertEqual(manifest["stockSha256Expected"], PATCHER.STOCK_SHA256)
             self.assertEqual(manifest["output"]["sha256"], report["outputSha256"])
             artifact = Path(manifest["rollbackArtifact"])
             self.assertEqual(hashlib.sha256(artifact.read_bytes()).hexdigest(), PATCHER.STOCK_SHA256)
@@ -516,6 +564,33 @@ class RealBundleTests(unittest.TestCase):
             self.assertTrue(second_report["idempotent"])
             self.assertFalse(second_report["changed"])
             self.assertEqual(second.read_bytes(), patched)
+            self.assertEqual(second_report["recognizedStockSha256"], PATCHER.STOCK_SHA256)
+
+
+@unittest.skipUnless(CURRENT_HOST_PATH.is_file(), "pinned 17184bb bundle absent")
+class CurrentHostTests(unittest.TestCase):
+    def test_current_host_patch_idempotence_manifest_and_syntax(self):
+        raw = CURRENT_HOST_PATH.read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), PATCHER.HOST_17184BB_SHA256)
+        text = raw.decode("utf-8")
+        self.assertEqual(text.count(PATCHER.INJECTION_ANCHOR), 1)
+        self.assertEqual(text.count(PATCHER.STOCK_CREATE_HOST_INFERENCE), 1)
+        self.assertEqual(text.count(PATCHER.CREATE_CURSOR_SAND_ANCHOR), 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output, second = root / "patched.cjs", root / "second.cjs"
+            first = PATCHER.patch_host_bundle(CURRENT_HOST_PATH, REAL_PROTOCOLS_DIR, REAL_SESSION_PATH, output, root / "backup")
+            again = PATCHER.patch_host_bundle(output, REAL_PROTOCOLS_DIR, REAL_SESSION_PATH, second, root / "backup")
+            self.assertTrue(first["changed"])
+            self.assertTrue(again["idempotent"])
+            self.assertEqual(output.read_bytes(), second.read_bytes())
+            self.assertIn("recordFollowupLabeling: function (_args) {}", output.read_text())
+            for report in (first, again):
+                manifest = json.loads(Path(report["backupManifest"]).read_text())
+                self.assertEqual(report["recognizedStockSha256"], PATCHER.HOST_17184BB_SHA256)
+                self.assertEqual(manifest["stockSha256Expected"], PATCHER.HOST_17184BB_SHA256)
+            self.assertEqual(CURRENT_HOST_PATH.read_bytes(), raw)
+            node_check(output)
 
 
 if __name__ == "__main__":

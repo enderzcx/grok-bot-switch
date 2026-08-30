@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic, version-fenced Grok Bot 0.30 provider-switcher patcher.
+"""Deterministic, hash-fenced Grok Bot provider-switcher patcher.
 
 Injects the generic protocol source modules plus provider-direct-session, then
 wraps createHostInference. Never edits the stock bundle in place. Output is
@@ -18,6 +18,8 @@ from typing import Dict, Mapping, Optional, Sequence
 
 
 STOCK_SHA256 = "3c3f986e614aaf8fbec642269da40dd20f1dbd9912bdf8f2390bafd61ec684ef"
+HOST_17184BB_SHA256 = "0035c31a74ac9d7fc9d93532cf37e217d6074143d46b1eeb3c5e79699df2f88f"
+SUPPORTED_STOCK_SHA256 = frozenset((STOCK_SHA256, HOST_17184BB_SHA256))
 STOCK_BUNDLE_PATH = Path("/Users/sunny/Work/CODEX/grok_home/research/current-0.30/host-main.cjs")
 
 MARKER_BEGIN = "// GROK_HOME_PROVIDER_SWITCHER_BEGIN"
@@ -349,6 +351,7 @@ def write_rollback_artifacts(
     idempotent: bool,
     input_counts: Mapping[str, int],
     output_counts: Mapping[str, int],
+    recognized_stock_sha256: str,
 ) -> Path:
     """Write a hash-named original copy plus JSON manifest. No credential fields."""
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -372,7 +375,7 @@ def write_rollback_artifacts(
         "schemaVersion": 1,
         "kind": "grok-host-provider-switcher-backup",
         "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "stockSha256Expected": STOCK_SHA256,
+        "stockSha256Expected": recognized_stock_sha256,
         "idempotent": idempotent,
         "input": {
             "path": str(input_path.resolve()),
@@ -464,11 +467,21 @@ def patch_host_bundle(
     session_raw = _read_bytes(session_path, "session source")
     session_text = _decode_utf8(session_raw, "session source")
 
-    if MARKER_BEGIN not in source and MARKER_END not in source:
-        if input_sha != STOCK_SHA256:
-            raise PatchError(
-                f"stock SHA-256 mismatch: got {input_sha}, expected {STOCK_SHA256}"
-            )
+    # Idempotence must not turn marker presence into an unknown-host bypass.
+    # Reverse only our two exact transformations, then fence the stock bytes;
+    # apply_patch below separately validates the full current injection payload.
+    stock_source = source
+    if MARKER_BEGIN in source or MARKER_END in source:
+        stock_source = stock_source.replace(_extract_injection_block(source), "", 1)
+        stock_source = stock_source.replace(
+            PATCHED_CREATE_HOST_INFERENCE, STOCK_CREATE_HOST_INFERENCE, 1
+        )
+    recognized_stock_sha256 = sha256_hex(stock_source.encode("utf-8"))
+    if recognized_stock_sha256 not in SUPPORTED_STOCK_SHA256:
+        raise PatchError(
+            f"stock SHA-256 mismatch: got {recognized_stock_sha256}, "
+            + "expected one of " + ", ".join(sorted(SUPPORTED_STOCK_SHA256))
+        )
 
     input_counts = anchor_counts(source)
     patched = apply_patch(source, protocol_texts, session_text)
@@ -489,6 +502,7 @@ def patch_host_bundle(
         idempotent=idempotent,
         input_counts=input_counts,
         output_counts=output_counts,
+        recognized_stock_sha256=recognized_stock_sha256,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -500,6 +514,7 @@ def patch_host_bundle(
         "changed": not idempotent,
         "idempotent": idempotent,
         "inputSha256": input_sha,
+        "recognizedStockSha256": recognized_stock_sha256,
         "outputSha256": sha256_hex(patched_bytes),
         "outputSize": len(patched_bytes),
         "backupManifest": str(manifest_path.resolve()),
@@ -517,7 +532,7 @@ def _print_report(report: Mapping[str, object]) -> None:
 
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Patch the pinned Grok Bot 0.30 host bundle with the generic provider switcher."
+        description="Patch a recognized hash-pinned Grok Bot host bundle with the generic provider switcher."
     )
     parser.add_argument("--stock", type=Path, required=True, help="stock host-main.cjs path")
     parser.add_argument(
