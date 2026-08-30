@@ -50,8 +50,8 @@ function varint(value) {
   do { bytes.push((value & 127) | (value > 127 ? 128 : 0)); value = Math.floor(value / 128); } while (value);
   return Buffer.from(bytes);
 }
-function textField(number, value) {
-  const data = Buffer.from(string(value));
+function textField(number, value, max = OVERHEAD) {
+  const data = Buffer.from(string(value, max));
   return Buffer.concat([varint(number * 8 + 2), varint(data.length), data]);
 }
 function envelope(data) {
@@ -105,9 +105,9 @@ function uniqueField(data, number, wire, fallback) {
 function decodeText(data) {
   try { return utf8.decode(data); } catch { fail("invalid-protobuf"); }
 }
-async function request(box, method, body, streaming, signal, maxBytes) {
+async function request(box, method, body, streaming, signal, maxBytes, requestLimit = OVERHEAD) {
   const { url, headers } = connection(box, method);
-  if (body.length > OVERHEAD) fail("request-too-large");
+  if (body.length > requestLimit) fail("request-too-large");
   if (signal?.aborted) fail("aborted");
   const controller = new AbortController();
   let reason = "transport-failed", reader;
@@ -119,7 +119,7 @@ async function request(box, method, body, streaming, signal, maxBytes) {
     const response = await fetch(url, {
       method: "POST", redirect: "error", credentials: "omit", cache: "no-store",
       signal: controller.signal, body,
-      headers: { ...headers, "Content-Type": streaming ? "application/connect+proto" : "application/proto", "Connect-Protocol-Version": "1", "Connect-Timeout-Ms": String(TIMEOUT_MS) },
+      headers: { ...headers, "Accept-Encoding": "identity", "Content-Type": streaming ? "application/connect+proto" : "application/proto", "Connect-Protocol-Version": "1", "Connect-Timeout-Ms": String(TIMEOUT_MS) },
     });
     if (controller.signal.aborted) fail(reason);
     if (response.status !== 200 || response.redirected) fail("http-failed");
@@ -131,7 +131,10 @@ async function request(box, method, body, streaming, signal, maxBytes) {
     }
     const length = response.headers.get("content-length");
     if (length !== null && (!/^\d+$/.test(length) || Number(length) > maxBytes)) fail("response-too-large");
-    if (!response.body) fail("missing-body");
+    if (!response.body) {
+      if (method === "WriteTextFile") return Buffer.alloc(0);
+      fail("missing-body");
+    }
     reader = response.body.getReader();
     const chunks = [];
     let size = 0;
@@ -161,6 +164,13 @@ async function readTextFile(box, path, { signal, maxBytes } = {}) {
   const content = uniqueField(body, 1, 2, Buffer.alloc(0));
   if (content.length > limit) fail("output-too-large");
   return decodeText(content);
+}
+async function writeTextFile(box, path, content, { signal, maxBytes } = {}) {
+  const limit = limitFor(maxBytes, DEFAULT_BYTES);
+  const body = Buffer.concat([textField(1, path), textField(2, content, limit)]);
+  const result = await request(box, "WriteTextFile", body, false, signal, OVERHEAD, limit + OVERHEAD);
+  if (result.length !== 0) fail("invalid-protobuf");
+  return { written: true };
 }
 async function exec(box, { command, args = [], cwd } = {}, { signal, maxBytes } = {}) {
   const limit = limitFor(maxBytes, EXEC_CAP);
@@ -207,4 +217,4 @@ async function exec(box, { command, args = [], cwd } = {}, { signal, maxBytes } 
   return { stdout: stdout.join(""), stderr: stderr.join(""), exitCode };
 }
 
-module.exports = { readTextFile, exec };
+module.exports = { readTextFile, writeTextFile, exec };

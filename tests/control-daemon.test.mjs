@@ -26,6 +26,18 @@ test("binary read sends native authentication and exact path field", async (t) =
   });
   assert.equal(await daemon.readTextFile(box, "/fixed/host-main.cjs"), "hello 世界");
 });
+test("bounded native write keeps content in protobuf, not command arguments or receipt", async (t) => {
+  mock(t, async (url, options) => {
+    assert.equal(String(url), "https://daemon.example/native/agent.v1.ControlService/WriteTextFile");
+    assert.equal(options.headers["Accept-Encoding"], "identity");
+    assert.deepEqual(options.body, Buffer.concat([bytes(1, "/fixed/private/request.json"), bytes(2, "PRIVATE_KEY")]));
+    return reply(null);
+  });
+  assert.deepEqual(await daemon.writeTextFile(box, "/fixed/private/request.json", "PRIVATE_KEY"), { written: true });
+  await rejects(daemon.writeTextFile(box, "/fixed", "x".repeat(1024 * 1024 + 1)), "invalid-input");
+  globalThis.fetch = async () => reply(bytes(1, "PRIVATE_KEY"));
+  await rejects(daemon.writeTextFile(box, "/fixed", "value"), "invalid-protobuf");
+});
 test("exec encodes argv/cwd and requires exit plus successful terminal", async (t) => {
   mock(t, async (url, options) => {
     assert.equal(String(url), "https://daemon.example/native/agent.v1.ControlService/Exec");

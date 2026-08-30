@@ -72,10 +72,10 @@ def _instance(value) -> bool:
         return False
 
 
-def _version(value, token: str):
+def _version(value, token: str, *, host=False):
     if value is None:
         return None
-    if not isinstance(value, str) or not _VERSION.fullmatch(value) or token in value:
+    if not isinstance(value, str) or token in value or not (_VERSION.fullmatch(value) or (host and re.fullmatch(r"[a-f0-9]{7,40}", value))):
         raise _Invalid()
     return value
 
@@ -112,6 +112,7 @@ def _manifest(home: Path, installed_executable) -> dict:
         expected = os.fspath(installed_executable)
         if not os.path.isabs(expected) or os.path.normcase(os.path.normpath(expected)) != os.path.normcase(os.path.normpath(executable)):
             raise _Invalid()
+    _version(data.get("clientVersion"), token)
     return data
 
 
@@ -127,11 +128,13 @@ def _sanitize(data: dict, manifest: dict) -> dict[str, object]:
         raise _Invalid()
     if "clientVersion" not in data:
         raise _Invalid()
+    if data["clientVersion"] != manifest.get("clientVersion"):
+        raise _Invalid()
     token = manifest["token"]
     result = {"connected": True, "service": MARKER, "schemaVersion": 1,
               "clientConnected": data["clientConnected"], "hostReachable": data["hostReachable"],
               "clientVersion": _version(data["clientVersion"], token),
-              "hostVersion": _version(data.get("hostVersion"), token),
+              "hostVersion": _version(data.get("hostVersion"), token, host=True),
               "hostBusy": data.get("hostBusy"), "providerSwitchReady": False, "reason": None}
     executor = data.get("executor")
     if isinstance(executor, dict) and all(type(executor.get(k)) is bool for k in ("available", "reachable")):

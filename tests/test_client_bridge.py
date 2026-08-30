@@ -94,6 +94,16 @@ class ClientBridgeTests(unittest.TestCase):
         self.assertEqual(status(missing)["reason"], "not-paired")
         self.assertFalse(missing.exists())
 
+    def test_native_host_git_version_is_supported(self):
+        self.body["hostVersion"] = "17184bb"
+        result = status(self.home, self.executable)
+        self.assertTrue(result["connected"])
+        self.assertEqual(result["hostVersion"], "17184bb")
+
+    def test_response_client_version_must_match_pairing(self):
+        self.body["clientVersion"] = "0.28.0"
+        self.assertEqual(status(self.home)["reason"], "invalid-response")
+
     def test_executable_mismatch_prevents_request(self):
         result = status(self.home, self.home / "Other.exe")
         self.assertEqual(result["reason"], "invalid-pairing")
