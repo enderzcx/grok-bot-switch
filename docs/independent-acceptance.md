@@ -36,7 +36,45 @@
 - 新版实际源码的精确锚点、补丁幂等性、备份身份和 Node 语法测试通过；只新增两个精确哈希，不放开未知版本。
 - 初次安装时正确阻止未知版本；新增已审查版本后，读回 `activeProfile=official`、健康、空闲、无待处理命令。
 
-## 尚需独立读回的证据
+## 正常客户端、云端事务与生产回执
 
-公开资产下载及校验、Grok Bot 执行安装提示词、正常聊天的供应商生产回执、切回官方、原生用量前后读数。
-这些不由上述本地测试或面板安装结果代替。
+2026-08-30 16:49–16:50 UTC，在未修改的 Mac Grok Bot 0.30.0 中新建测试 Bot，
+发送 `Your name is Grok Switch Independent Test. Reply exactly GROK_SWITCH_INDEPENDENT_OK. Do not use any tools.`。
+客户端正常聊天返回 `GROK_SWITCH_INDEPENDENT_OK`，已用 Cua Driver 树与截图交叉确认。
+
+- 外部切换：`gbs-f8b77fd0-a3a6-4027-a43d-dd1f480e9ad4`，generation 3，verified。
+- 外部主进程：PID `891262`，startedAt `1788108515330`，SHA-256 `35b8e56dfac3208c1ca1fb1dc226634ce9aa515d5ce73d62adedbba3a39aaf8b`。
+- 面板运行的是 CI 发布候选包 `299d2864d651764a8197aa6e41d22865cbb2bcd40755bea8ec5bb02947b0ced9`。
+- 云端三条 `recentReceipts` 的 request id 与下列生产日志逐条匹配，均为 HTTP 200、streaming=true、OpenAI Chat、grok-4.6。
+
+| 生产日志 id | request id | quota |
+|---|---|---:|
+| 1657552 | `202608301649388740028578268d9d6wD51D1K0` | 29230 |
+| 1657553 | `202608301649521912304248268d9d63mU2jkzi` | 28530 |
+| 1657554 | `202608301650011960146258268d9d6ulUjSem6` | 1124 |
+
+三条均为 group `grok`、channel 254、token 2383。测试 Key 的 used_quota 从
+4588872 增至 4647756，差额 58884，与表中之和一致。没有输出 Key。
+BeefAPI 只用于本轮验收，不在运行包、默认配置或安装提示词中。
+
+恢复官方：`gbs-1bf70dc3-b391-4f05-bdd6-eb116cd0695d`，generation 4，verified。
+原版每周用量在测试前后均显示 6%；中间还包含官方对照请求和新 Bot 初始化，
+不能据此声称外部测试期间官方额度精确为零。
+
+## 保留的失败与限制
+
+先使用一个已有大量工具/图片历史的 Bot 测试，未获得回复和外部回执，测试 Key 用量未变。
+已立即在空闲后恢复官方；同一个 Bot 随后的官方对照返回 `GROK_SWITCH_OFFICIAL_BASELINE_OK`。
+新建 Bot 的外部测试成功，但这不能覆盖旧会话的失败。尚未确认具体执行时消息形状的根因。
+导出的可读 transcript 不是运行时模型消息，不能凭对导出格式的离线拒绝直接定因。
+首版建议新建 Bot 验证，不承诺任意既有富媒体/工具历史均可跨协议续接；不删除或静默丢弃历史。
+
+维护网络的直连 SSH 一度超时，改用既有 Tailscale 用户态转发后可达；云端面板和模型请求均继续运行。
+这不是产品要求用户配置 Tailscale，维护网络也未加入独立运行包。
+
+## CI 与发布资产
+
+[CI 33323031919](https://github.com/enderzcx/grok-bot-switch/actions/runs/33323031919) 完成前后端测试、Linux 安装、重复安装复用 PID、状态查询和停止。
+[CI 33323540886](https://github.com/enderzcx/grok-bot-switch/actions/runs/33323540886) 对归档来源再次通过验证。
+最终 ZIP 采用 CI 原始资产；本地在同一编译后前端输入下重建 SHA-256 一致。
+待公开资产上线后再验证公开下载和 Grok Bot 提示词执行，不提前宣称这两个步骤完成。
