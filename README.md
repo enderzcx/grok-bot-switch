@@ -1,14 +1,16 @@
 # Grok Bot Switch
 
-仓库：[`enderzcx/grok-bot-switch`](https://github.com/enderzcx/grok-bot-switch) · CLI：`grokctl` · 状态：本地实验版
+仓库：[`enderzcx/grok-bot-switch`](https://github.com/enderzcx/grok-bot-switch) · CLI：`grokctl` · 状态：Windows 公开预览版
 
 一个不绑定供应商的 Grok Bot 通道管理工具：保存兼容服务的 URL、模型和 API key，明确选择协议，在官方通道与外部通道之间切换。非 xAI / X 官方项目。
 
 产品入口是自动识别本机已安装的 Grok Bot，不要求用户配置 SSH 或 Tailscale。Windows 0.28.0 的可恢复客户端适配、原生连接和切换控制器已通过实机验收；已检查的接口和接入边界见 [本机客户端接入](docs/local-client-integration.md)。
 
-**当前是内部测试版，不是公开发行版。** 已在 Windows 完成官方 → 自定义 API → 官方的真实切换，并从普通 Grok Bot 聊天读回 `GROK_BOT_SWITCH_EXTERNAL_OK`，五条外部请求均与供应商生产回执匹配。此次真实协议为 OpenAI Chat；Responses、Messages 已有本地测试，但未完成相同的实机供应商验收。供应商 OAuth 尚未实现。完整证据和限制见 [原生接入验收记录](docs/native-client-rollout.md)。
+**当前是公开预览版，不是稳定版。** 已在 Windows 完成官方 → 自定义 API → 官方的真实切换，并从普通 Grok Bot 聊天读回 `GROK_BOT_SWITCH_EXTERNAL_OK`，五条外部请求均与供应商生产回执匹配。此次真实协议为 OpenAI Chat；Responses、Messages 已有本地测试，但未完成相同的实机供应商验收。供应商 OAuth 尚未实现。完整证据和限制见 [原生接入验收记录](docs/native-client-rollout.md)。
 
 ## 使用
+
+[下载 Windows x64 预览版 v0.2.0-beta.1](https://github.com/enderzcx/grok-bot-switch/releases/tag/v0.2.0-beta.1)。下载后可用同页的 `SHA256SUMS.txt` 校验 ZIP 完整性。
 
 Windows 桌面测试包已可构建：解压后双击 `GrokBotSwitch.exe`，不需要安装 Python/Node。原生窗口、真实主机切换与生产验收的完成状态分开记录，见 [Windows 桌面验收](docs/desktop-windows.md)。下方命令用于源码/CLI 使用。
 
