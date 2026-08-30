@@ -32,6 +32,15 @@ export interface Status {
   runtimeKind: string | null;
   blocking: string[];
   host: { wired: boolean };
+  previousProfile?: string | null;
+  client?: {
+    connected: boolean;
+    mode: "probe" | "native-switch";
+    hostReachable: boolean;
+    providerSwitchReady: boolean;
+    runtime?: Record<string, unknown>;
+  };
+  activation?: Activation | null;
   installation?: {
     detected: boolean;
     ambiguous: boolean;
@@ -39,6 +48,18 @@ export interface Status {
     installations: { path: string; executable: string; version: string }[];
   };
 }
+export interface Activation {
+  id: string;
+  status: "pending" | "verified" | "needs-attention" | "failed";
+  phase: string;
+  error?: string | { message?: string } | null;
+  target: string;
+  generation: number;
+}
+export type ActionResult = Partial<Activation> & {
+  verified?: boolean;
+  ok?: boolean;
+};
 export interface Plan {
   target?: string;
   id?: string;
@@ -63,7 +84,11 @@ export function csrfToken(): string {
       ?.content || ""
   );
 }
-export async function api<T>(path: string, body?: unknown): Promise<T> {
+export async function api<T>(
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
   if (!path.startsWith("/api/") || path.includes("://"))
     throw new Error("只允许本机 API");
   const response = await fetch(path, {
@@ -71,6 +96,7 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
     credentials: "same-origin",
     cache: "no-store",
     redirect: "error",
+    ...(signal ? { signal } : {}),
     headers:
       body === undefined
         ? { Accept: "application/json" }
@@ -78,7 +104,12 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error?.message || "请求失败");
+  if (!response.ok)
+    throw new Error(
+      (typeof payload.error === "string"
+        ? payload.error
+        : payload.error?.message) || "请求失败",
+    );
   return payload as T;
 }
 export const profilePath = (id: string) =>

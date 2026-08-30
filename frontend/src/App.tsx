@@ -35,6 +35,8 @@ import {
   type Status,
   type Plan,
   type Activity,
+  type Activation,
+  type ActionResult,
 } from "@/lib/api";
 
 type Review = {
@@ -43,6 +45,35 @@ type Review = {
 };
 const message = (error: unknown) =>
   error instanceof Error ? error.message : "操作失败";
+const nativeAttached = (status: Status | null) =>
+  status?.runtimeKind === "native-host" &&
+  status.client?.mode === "native-switch";
+const nativeReady = (status: Status | null) =>
+  !!(
+    status?.runtimeKind === "native-host" &&
+    status.host.wired &&
+    status.client?.connected === true &&
+    status.client.hostReachable &&
+    status.client.providerSwitchReady &&
+    status.client.mode === "native-switch"
+  );
+const activationResult = (result: ActionResult): Activation | null =>
+  result.id &&
+  result.status &&
+  result.target &&
+  typeof result.generation === "number"
+    ? {
+        ...result,
+        phase: result.phase || "",
+        id: result.id,
+        status: result.status,
+        target: result.target,
+        generation: result.generation,
+      }
+    : null;
+const activationError = (job: Activation) =>
+  (typeof job.error === "string" ? job.error : job.error?.message) ||
+  "尚未确认切换结果，请继续检查。";
 
 function SecretDialog({
   profile,
@@ -100,6 +131,10 @@ function SecretDialog({
               : "未安装密钥"}
             。已有密钥不会显示。
           </p>
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            使用此供应商时，地址和密钥会同步到当前 Grok Bot
+            云端。切换会影响该云端的所有 Bot。
+          </p>
           {error && (
             <p role="alert" className="text-red-600">
               {error}
@@ -149,6 +184,15 @@ export default function App() {
     null,
   );
   const switchInFlight = useRef(false);
+  const connectInFlight = useRef(false);
+  const [job, setJob] = useState<Activation | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [connectionError, setConnectionError] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [pollPaused, setPollPaused] = useState(false);
+  const [progressNote, setProgressNote] = useState("");
+  const [pollEpoch, setPollEpoch] = useState(0);
+  const mounted = useRef(true);
   const [view, setView] = useState<"providers" | "activity">("providers");
   const [events, setEvents] = useState<Activity[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
@@ -159,6 +203,44 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
+  function observeActivation(
+    next: Activation,
+    current: Status,
+    announce = false,
+  ) {
+    setStatus(current);
+    if (next.status === "verified") {
+      const readback = current.activation;
+      if (
+        nativeReady(current) &&
+        !current.blocking.length &&
+        current.activeProfile === next.target &&
+        readback?.id === next.id &&
+        readback.status === "verified" &&
+        readback.target === next.target &&
+        readback.generation === next.generation
+      ) {
+        setJob(null);
+        setProgressNote("");
+        setSwitchErrors((errors) => ({ ...errors, [next.target]: "" }));
+        if (announce)
+          setNotice(
+            "已切换到「" +
+              (profiles.find((p) => p.id === next.target)?.displayName ||
+                next.target) +
+              "」。",
+          );
+        return;
+      }
+      setJob({
+        ...next,
+        status: "needs-attention",
+        error: "尚未确认目标通道已生效，请继续检查。",
+      });
+      return;
+    }
+    setJob(next);
+  }
   async function reload() {
     const seq = ++serial.current;
     setLoading(true);
@@ -171,6 +253,7 @@ export default function App() {
       if (seq === serial.current) {
         setStatus(current);
         setProfiles(list.providers);
+        if (current.activation) observeActivation(current.activation, current);
         return current;
       }
     } catch (err) {
@@ -180,11 +263,133 @@ export default function App() {
     }
   }
   useEffect(() => {
+    mounted.current = true;
     void reload();
     return () => {
       serial.current++;
+      mounted.current = false;
     };
   }, []);
+  const pendingId = job?.status === "pending" ? job.id : null;
+  useEffect(() => {
+    if (!pendingId) return;
+    let cancelled = false;
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const controller = new AbortController();
+    setPollPaused(false);
+    setProgressNote("");
+    const deadline = setTimeout(() => {
+      controller.abort();
+      if (!cancelled) {
+        setChecking(false);
+        setPollPaused(true);
+        setProgressNote("仍在等待确认，可以稍后继续检查。");
+      }
+    }, 60000);
+    async function progress() {
+      setChecking(true);
+      try {
+        const result = await api<ActionResult>(
+          "/api/progress",
+          {},
+          controller.signal,
+        );
+        const current = await api<Status>(
+          "/api/status",
+          undefined,
+          controller.signal,
+        );
+        if (cancelled || controller.signal.aborted) return;
+        const returned = activationResult(result);
+        const next =
+          returned?.status === "needs-attention" ||
+          returned?.status === "failed"
+            ? returned
+            : current.activation || returned;
+        if (
+          !next ||
+          next.id !== pendingId ||
+          next.target !== job?.target ||
+          next.generation !== job?.generation ||
+          (returned &&
+            (returned.id !== pendingId ||
+              returned.target !== job?.target ||
+              returned.generation !== job?.generation))
+        ) {
+          setJob(
+            (previous) =>
+              previous && {
+                ...previous,
+                status: "needs-attention",
+                error: "无法确认当前切换任务，请刷新状态。",
+              },
+          );
+          return;
+        }
+        observeActivation(next, current, true);
+        if (next.status === "pending") {
+          if (++attempts < 12) timer = setTimeout(() => void progress(), 2000);
+          else {
+            setPollPaused(true);
+            setProgressNote("仍在等待确认，可以稍后继续检查。");
+          }
+        }
+      } catch (err) {
+        if (!cancelled && !controller.signal.aborted) {
+          setPollPaused(true);
+          setProgressNote("检查暂时中断，切换结果尚未确认。" + message(err));
+        }
+      } finally {
+        if (!cancelled) setChecking(false);
+      }
+    }
+    timer = setTimeout(() => void progress(), 1000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      clearTimeout(deadline);
+      controller.abort();
+    };
+    // Job identity, not response object identity, owns the bounded polling loop.
+  }, [pendingId, pollEpoch]);
+  function resumeProgress() {
+    if (!job || checking) return;
+    setJob({ ...job, status: "pending", error: null });
+    setPollEpoch((value) => value + 1);
+  }
+  async function connect() {
+    if (
+      busy ||
+      nativeAttached(status) ||
+      connectInFlight.current ||
+      pendingId ||
+      switchInFlight.current
+    )
+      return;
+    connectInFlight.current = true;
+    setConnecting(true);
+    setConnectionError("");
+    setNotice("");
+    try {
+      const result = await api<ActionResult>("/api/connect", {});
+      if (!mounted.current) return;
+      const current = await reload();
+      if (!current || !mounted.current) return;
+      const next = activationResult(result) || current.activation;
+      if (next) observeActivation(next, current);
+      else if (nativeReady(current)) setNotice("已连接 Grok Bot。");
+      else
+        setConnectionError(
+          "连接尚未确认，请确认 Grok Bot 已打开并登录，再刷新状态。",
+        );
+    } catch (err) {
+      if (mounted.current) setConnectionError(message(err));
+    } finally {
+      connectInFlight.current = false;
+      if (mounted.current) setConnecting(false);
+    }
+  }
   async function activity() {
     setView("activity");
     setActivityLoading(true);
@@ -201,10 +406,18 @@ export default function App() {
   }
 
   async function switchProvider(profile?: Profile) {
-    if (busy || loading || switchInFlight.current) return;
+    if (
+      busy ||
+      loading ||
+      connecting ||
+      (job && job.status !== "failed") ||
+      switchInFlight.current
+    )
+      return;
     switchInFlight.current = true;
     setBusy(true);
     setSwitching({ target: profile?.id ?? null });
+    if (job?.status === "failed") setJob(null);
     setNotice("");
     const report = (reason: string) => {
       if (profile)
@@ -221,13 +434,26 @@ export default function App() {
       if (blockers.length) throw new Error(blockers.join("；"));
       if (!plan.target || (profile && plan.target !== profile.id))
         throw new Error("无法确认切换目标，请刷新后重试。");
-      await api(profile ? "/api/use" : "/api/rollback", {
-        target: plan.target,
-        apply: true,
-      });
+      const result = await api<ActionResult>(
+        profile ? "/api/use" : "/api/rollback",
+        {
+          target: plan.target,
+          apply: true,
+        },
+      );
+      if (!mounted.current) return;
       const current = await reload();
       if (!current)
         throw new Error("切换请求已提交，但状态读取失败，请刷新确认。");
+      const next = activationResult(result) || current.activation;
+      if (next) {
+        if (next.target !== plan.target)
+          throw new Error("无法确认切换目标，请刷新后重试。");
+        observeActivation(next, current, true);
+        return;
+      }
+      if (result.verified === false || result.status === "pending")
+        throw new Error("切换仍在处理中，尚未确认生效，请刷新状态。");
       const simulated = current.runtimeKind === "lab-synthetic";
       if (current.activeProfile !== plan.target || current.blocking.length)
         throw new Error("尚未确认目标通道已生效，请刷新查看主机状态。");
@@ -243,8 +469,10 @@ export default function App() {
       report(message(err));
     } finally {
       switchInFlight.current = false;
-      setSwitching(null);
-      setBusy(false);
+      if (mounted.current) {
+        setSwitching(null);
+        setBusy(false);
+      }
     }
   }
 
@@ -327,12 +555,13 @@ export default function App() {
   const isLab = status?.runtimeKind === "lab-synthetic";
   const installation = status?.installation;
   const installed = installation?.installations[0];
+  const unconfirmed = !!job && job.status !== "failed";
   const visible = profiles.filter((p) =>
     (p.displayName + " " + p.id + " " + p.model + " " + p.protocol)
       .toLowerCase()
       .includes(query.toLowerCase()),
   );
-  const disabled = busy || loading;
+  const disabled = busy || loading || connecting || unconfirmed;
   return (
     <div className="workspace">
       <a
@@ -366,7 +595,7 @@ export default function App() {
               variant="ghost"
               size="icon"
               aria-label="刷新"
-              disabled={disabled}
+              disabled={busy || loading || connecting || checking}
               onClick={() => void reload()}
             >
               <RefreshCw className="h-4 w-4" />
@@ -389,18 +618,30 @@ export default function App() {
                     ? "状态读取失败"
                     : isLab
                       ? "模拟环境"
-                      : status?.host.wired
-                        ? "已接入"
-                        : installation?.ambiguous
-                          ? "检测到多个安装"
-                          : installed
-                            ? "已检测到 " + installed.version
-                            : installation
-                              ? "未找到 Grok Bot"
-                              : "主机未接入"}
+                      : connecting
+                        ? "连接中"
+                        : nativeAttached(status) ||
+                            (status?.host.wired && !status.client)
+                          ? "已接入"
+                          : installation?.ambiguous
+                            ? "检测到多个安装"
+                            : installed
+                              ? "已检测到 " + installed.version
+                              : installation
+                                ? "未找到 Grok Bot"
+                                : "主机未接入"}
               </span>
             </p>
-            <span className="text-xs text-muted-foreground">失败不回退</span>
+            {installed && !isLab && !nativeAttached(status) && (
+              <Button
+                variant="outline"
+                className="min-h-10"
+                disabled={disabled || installation?.ambiguous}
+                onClick={() => void connect()}
+              >
+                {connecting ? "连接中" : "连接 Grok Bot"}
+              </Button>
+            )}
           </div>
           <p className="mt-2 text-xs text-muted-foreground">
             {loading
@@ -409,12 +650,58 @@ export default function App() {
                 ? "暂时无法读取状态，请点击刷新重试。"
                 : isLab
                   ? "当前连接的是模拟主机，不代表真实 Grok Bot 已切换。"
-                  : status?.host.wired
-                    ? "切换以主机读回状态为准。"
+                  : nativeAttached(status) ||
+                      (status?.host.wired && !status.client)
+                    ? "切换以确认后的状态为准。"
                     : installed
-                      ? "已找到本机 Grok Bot，尚未接入切换。可先管理供应商配置。"
+                      ? "已找到本机 Grok Bot，尚未连接。"
                       : "请先安装 Grok Bot，安装后点击刷新。"}
           </p>
+          {installed && !isLab && !nativeAttached(status) && (
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+              首次连接前请先退出 Grok Bot。连接会备份安装文件，保留登录和 Bot
+              数据，完成后重新打开应用。
+            </p>
+          )}
+          {!isLab && (installed || status?.client) && (
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+              切换会影响当前云端的所有 Bot，并将供应商地址和密钥同步到该云端。
+            </p>
+          )}
+          {connectionError && (
+            <p
+              role="alert"
+              className="mt-3 break-words text-sm text-red-600 dark:text-red-300"
+            >
+              {connectionError}
+            </p>
+          )}
+          {job && (
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm">
+              <p
+                role={job.status === "pending" ? "status" : "alert"}
+                className={
+                  job.status === "pending"
+                    ? "text-muted-foreground"
+                    : "text-red-600 dark:text-red-300"
+                }
+              >
+                {job.status === "pending"
+                  ? progressNote || "切换正在等待确认，请勿重复提交。"
+                  : "切换尚未确认。" + activationError(job)}
+              </p>
+              {(pollPaused || job.status !== "pending") && (
+                <Button
+                  variant="outline"
+                  className="min-h-10"
+                  disabled={checking || busy || connecting}
+                  onClick={resumeProgress}
+                >
+                  继续检查
+                </Button>
+              )}
+            </div>
+          )}
           {installed && (
             <details className="mt-2 text-xs text-muted-foreground">
               <summary className="cursor-pointer">安装位置</summary>
@@ -518,10 +805,22 @@ export default function App() {
                     key={profile.id}
                     provider={profile}
                     active={
-                      !error && !isLab && status?.activeProfile === profile.id
+                      !error &&
+                      !isLab &&
+                      !job &&
+                      !switchErrors[profile.id] &&
+                      status?.host.wired === true &&
+                      status.activeProfile === profile.id &&
+                      (!status.client ||
+                        (nativeAttached(status) &&
+                          status.client.connected &&
+                          status.client.hostReachable))
                     }
                     busy={disabled || !!error}
-                    switching={switching?.target === profile.id}
+                    switching={
+                      switching?.target === profile.id ||
+                      (job?.status === "pending" && job.target === profile.id)
+                    }
                     switchError={switchErrors[profile.id]}
                     onAction={(kind, p) => void action(kind, p)}
                   />

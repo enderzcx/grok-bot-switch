@@ -1,5 +1,12 @@
-import { beforeEach, expect, test, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import "./i18n";
 import App from "./App";
@@ -10,6 +17,8 @@ import {
   planBlockers,
   type Profile,
   type Plan,
+  type Status,
+  type Activation,
 } from "./lib/api";
 
 const profile: Profile = {
@@ -35,6 +44,7 @@ beforeEach(() => {
   document.head.innerHTML = '<meta name="csrf-token" content="test-csrf">';
   vi.stubGlobal("fetch", vi.fn());
 });
+afterEach(() => vi.useRealTimers());
 
 test("endpoint query and path suffix match the Python profile contract", () => {
   expect(
@@ -230,7 +240,7 @@ test("installed Grok Bot is detected but never presented as connected or active"
   render(<App />);
   await screen.findByText("已检测到 0.30.0");
   expect(
-    screen.getByText("已找到本机 Grok Bot，尚未接入切换。可先管理供应商配置。"),
+    screen.getByText("已找到本机 Grok Bot，尚未连接。"),
   ).toBeInTheDocument();
   expect(screen.queryByText("使用中")).not.toBeInTheDocument();
   expect(
@@ -440,4 +450,329 @@ test("readback failure does not announce a successful switch", async () => {
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
   expect(screen.queryByText("使用中")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "刷新" })).toBeEnabled();
+});
+
+const pendingActivation: Activation = {
+  id: "native-job-1",
+  status: "pending",
+  phase: "waiting-idle",
+  target: profile.id,
+  generation: 7,
+};
+function nativeStatus(
+  activation: Activation | null = null,
+  activeProfile: string | null = null,
+): Status {
+  return {
+    desiredProfile: profile.id,
+    activeProfile,
+    previousProfile: "official",
+    runtimeKind: "native-host",
+    host: { wired: true },
+    blocking: [],
+    activation,
+    client: {
+      connected: true,
+      mode: "native-switch",
+      hostReachable: true,
+      providerSwitchReady: true,
+    },
+    installation: {
+      detected: true,
+      ambiguous: false,
+      integrationReady: true,
+      installations: [
+        {
+          path: "C:\\Apps\\Grok Bot",
+          executable: "C:\\Apps\\Grok Bot.exe",
+          version: "0.28.0",
+        },
+      ],
+    },
+  };
+}
+const advance = (ms: number) =>
+  act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+const click = (name: string) =>
+  act(async () => {
+    fireEvent.click(screen.getByRole("button", { name }));
+  });
+
+test("connects a detected probe-mode client inline with one POST and fresh ready status", async () => {
+  let connected = false;
+  const current = nativeStatus();
+  vi.mocked(fetch).mockImplementation(async (url, options) => {
+    if (url === "/api/providers") return json({ providers: [profile] });
+    if (url === "/api/status")
+      return json(
+        connected
+          ? current
+          : {
+              ...current,
+              runtimeKind: null,
+              host: { wired: false },
+              client: {
+                ...current.client,
+                mode: "probe",
+                providerSwitchReady: false,
+              },
+            },
+      );
+    if (url === "/api/connect") {
+      expect(JSON.parse(String(options?.body))).toEqual({});
+      connected = true;
+      return json({ ok: true });
+    }
+    throw new Error("unexpected request");
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  const button = await screen.findByRole("button", { name: "连接 Grok Bot" });
+  expect(screen.getByText(/首次连接前请先退出/)).toHaveTextContent(
+    "保留登录和 Bot 数据",
+  );
+  expect(screen.getByText(/切换会影响当前云端/)).toHaveTextContent(
+    "供应商地址和密钥",
+  );
+  await user.dblClick(button);
+  expect(await screen.findByText("已连接 Grok Bot。")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "连接 Grok Bot" }),
+  ).not.toBeInTheDocument();
+  expect(
+    vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/connect"),
+  ).toHaveLength(1);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.queryByText(/SSH|Tailscale/)).not.toBeInTheDocument();
+});
+
+test("first connection errors remain inline and do not claim connection", async () => {
+  const current = nativeStatus();
+  vi.mocked(fetch).mockImplementation(async (url) => {
+    if (url === "/api/providers") return json({ providers: [profile] });
+    if (url === "/api/status")
+      return json({
+        ...current,
+        runtimeKind: null,
+        host: { wired: false },
+        client: {
+          ...current.client,
+          mode: "probe",
+          providerSwitchReady: false,
+        },
+      });
+    return json({ error: { message: "请先退出 Grok Bot，再连接。" } }, 409);
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(
+    await screen.findByRole("button", { name: "连接 Grok Bot" }),
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "请先退出 Grok Bot",
+  );
+  expect(screen.queryByText("已连接 Grok Bot。")).not.toBeInTheDocument();
+});
+
+test("pending use never marks target active and progresses once to verified matching readback", async () => {
+  vi.useFakeTimers();
+  let current = nativeStatus();
+  vi.mocked(fetch).mockImplementation(async (url, options) => {
+    if (url === "/api/providers") return json({ providers: [profile] });
+    if (url === "/api/status") return json(current);
+    if (url === "/api/plan")
+      return json({ target: profile.id, wired: true, blocking: [] });
+    if (url === "/api/use") {
+      current = nativeStatus(pendingActivation, profile.id);
+      return json({ ...pendingActivation, verified: false });
+    }
+    if (url === "/api/progress") {
+      expect(JSON.parse(String(options?.body))).toEqual({});
+      current = nativeStatus(
+        { ...pendingActivation, status: "verified" },
+        profile.id,
+      );
+      return json({ ...current.activation, verified: true });
+    }
+    throw new Error("unexpected request");
+  });
+  await act(async () => {
+    render(<App />);
+  });
+  await click("使用");
+  expect(screen.getByRole("button", { name: "切换中" })).toBeDisabled();
+  expect(screen.getByRole("status")).toHaveTextContent("等待确认");
+  expect(screen.queryByText("使用中")).not.toBeInTheDocument();
+  await click("切换中");
+  expect(
+    vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/use"),
+  ).toHaveLength(1);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  await advance(1000);
+  expect(screen.getByRole("button", { name: "使用中" })).toBeDisabled();
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "已切换到「测试供应商」",
+  );
+  expect(
+    vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/progress"),
+  ).toHaveLength(1);
+});
+
+test.each(["official", profile.id])(
+  "verified result requires matching target and generation in fresh status: %s",
+  async (active) => {
+    vi.useFakeTimers();
+    let current = nativeStatus(pendingActivation);
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      if (url === "/api/providers") return json({ providers: [profile] });
+      if (url === "/api/status") return json(current);
+      if (url === "/api/progress") {
+        current = nativeStatus(
+          {
+            ...pendingActivation,
+            status: "verified",
+            generation: active === profile.id ? 99 : 7,
+          },
+          active,
+        );
+        return json({
+          ...pendingActivation,
+          status: "verified",
+          verified: true,
+        });
+      }
+      throw new Error("unexpected request");
+    });
+    await act(async () => {
+      render(<App />);
+    });
+    await advance(1000);
+    expect(screen.getByRole("alert")).toHaveTextContent("尚未确认");
+    expect(screen.queryByText("使用中")).not.toBeInTheDocument();
+    expect(screen.queryByText(/已切换到/)).not.toBeInTheDocument();
+  },
+);
+
+test("reopened pending job resumes progress without plan or second apply", async () => {
+  vi.useFakeTimers();
+  vi.mocked(fetch).mockImplementation(async (url) => {
+    if (url === "/api/providers") return json({ providers: [profile] });
+    if (url === "/api/status") return json(nativeStatus(pendingActivation));
+    if (url === "/api/progress")
+      return json({ ...pendingActivation, verified: false });
+    throw new Error("duplicate begin");
+  });
+  await act(async () => {
+    render(<App />);
+  });
+  await advance(30000);
+  expect(
+    vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/progress"),
+  ).toHaveLength(12);
+  expect(screen.getByRole("status")).toHaveTextContent("仍在等待确认");
+  expect(screen.getByRole("button", { name: "继续检查" })).toBeEnabled();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.some(([url]) => url === "/api/use" || url === "/api/plan"),
+  ).toBe(false);
+  await click("继续检查");
+  await advance(1000);
+  expect(
+    vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/progress"),
+  ).toHaveLength(13);
+});
+
+test.each(["needs-attention", "failed"])(
+  "conservative %s progress does not auto-resume from stale pending journal",
+  async (resultStatus) => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      if (url === "/api/providers") return json({ providers: [profile] });
+      if (url === "/api/status") return json(nativeStatus(pendingActivation));
+      if (url === "/api/progress")
+        return json({
+          ...pendingActivation,
+          status: resultStatus,
+          error: "尚未取得确认回执",
+          verified: false,
+        });
+      throw new Error("unexpected request");
+    });
+    await act(async () => {
+      render(<App />);
+    });
+    await advance(30000);
+    expect(
+      vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/progress"),
+    ).toHaveLength(1);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "切换尚未确认。尚未取得确认回执",
+    );
+    expect(
+      screen.queryByRole("button", { name: /强制|重启/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("使用中")).not.toBeInTheDocument();
+    await click("刷新");
+    await advance(1000);
+    expect(
+      vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/progress"),
+    ).toHaveLength(2);
+  },
+);
+
+test.each([null, pendingActivation])(
+  "attached native host never offers bootstrap merely because it is busy: %j",
+  async (activation) => {
+    vi.useFakeTimers();
+    const current = nativeStatus(activation, activation ? null : profile.id);
+    current.blocking = ["busy-agent"];
+    current.client!.providerSwitchReady = false;
+    vi.mocked(fetch).mockImplementation(async (url) =>
+      url === "/api/providers" ? json({ providers: [profile] }) : json(current),
+    );
+    await act(async () => {
+      render(<App />);
+    });
+    expect(screen.getByText("已接入")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "连接 Grok Bot" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/首次连接前/)).not.toBeInTheDocument();
+    if (activation)
+      expect(screen.getByRole("status")).toHaveTextContent("等待确认");
+    else expect(screen.getByRole("button", { name: "使用中" })).toBeDisabled();
+    expect(
+      vi.mocked(fetch).mock.calls.some(([url]) => url === "/api/connect"),
+    ).toBe(false);
+  },
+);
+
+test("unmount cancels in-flight progress and leaves no polling timer", async () => {
+  vi.useFakeTimers();
+  let signal: AbortSignal | undefined;
+  vi.mocked(fetch).mockImplementation(async (url, options) => {
+    if (url === "/api/providers") return json({ providers: [profile] });
+    if (url === "/api/status") return json(nativeStatus(pendingActivation));
+    signal = options?.signal as AbortSignal;
+    return new Promise((_, reject) =>
+      signal?.addEventListener("abort", () => reject(new Error("aborted"))),
+    );
+  });
+  let view!: ReturnType<typeof render>;
+  await act(async () => {
+    view = render(<App />);
+  });
+  await advance(1000);
+  await act(async () => {
+    view.unmount();
+  });
+  expect(signal?.aborted).toBe(true);
+  await advance(60000);
+  expect(
+    vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/progress"),
+  ).toHaveLength(1);
 });
