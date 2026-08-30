@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterator, Mapping, Optional, Tuple
+from grokctl.platform_security import IS_WINDOWS, open_nofollow, private_permissions, reject_links, set_private_permissions
 
 
 PRODUCTION_SUPERVISOR_COMMAND = Path("/tmp/sand-supervisor/command.json")
@@ -54,6 +55,7 @@ def isoformat_z(dt: datetime) -> str:
 
 def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o644) -> None:
     path = Path(path)
+    reject_links(path)
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -63,7 +65,9 @@ def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o644) -> None:
     fd = None
     replaced = False
     try:
-        fd = os.open(str(tmp), flags, 0o600)
+        fd = open_nofollow(tmp, flags)
+        if IS_WINDOWS:
+            set_private_permissions(tmp, mode, fd=fd)
         view = memoryview(data) if data else memoryview(b"")
         offset = 0
         while offset < len(data):
@@ -76,7 +80,7 @@ def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o644) -> None:
             os.fchmod(fd, mode)
         os.close(fd)
         fd = None
-        if not hasattr(os, "fchmod"):
+        if not IS_WINDOWS and not hasattr(os, "fchmod"):
             os.chmod(str(tmp), mode)
         os.replace(str(tmp), str(path))
         replaced = True
@@ -122,6 +126,10 @@ def contained_secret_path(root: Path, secret_ref: str) -> Path:
     if rel.is_absolute() or not rel.parts:
         raise HostError("invalid secret reference", "invalid_secret")
     root = Path(root)
+    try:
+        reject_links(root / rel)
+    except OSError as exc:
+        raise HostError("secret path contains a link or reparse point", "invalid_secret") from exc
     if root.exists() and root.is_symlink():
         raise HostError("secrets root must not be a symlink", "invalid_secret")
     current = root
@@ -164,7 +172,7 @@ def iter_secret_files(root: Path) -> Iterator[Path]:
                 raise HostError("secret snapshot is unreadable", "invalid_secret") from exc
             if not stat.S_ISREG(info.st_mode):
                 raise HostError("secret snapshot contains a non-regular file", "invalid_secret")
-            if stat.S_IMODE(info.st_mode) & 0o077:
+            if not private_permissions(child, info):
                 raise HostError("secret snapshot has unsafe permissions", "invalid_secret")
             yield child
 
@@ -173,11 +181,13 @@ def read_regular_nofollow(path: Path, max_bytes: int = 64 * 1024) -> bytes:
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(str(path), flags)
+    fd = open_nofollow(path, flags)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise HostError("secret must be a direct regular file", "invalid_secret")
+        if not private_permissions(path, info, fd=fd):
+            raise HostError("secret has unsafe permissions", "invalid_secret")
         if info.st_size > max_bytes:
             raise HostError("secret exceeds size limit", "invalid_secret")
         chunks = []
@@ -736,6 +746,8 @@ def build_runtime(
     hop_cmdline_token: str = "provider_hop.py",
     supervisor_command_path: Optional[Path] = None,
 ) -> HostRuntime:
+    if IS_WINDOWS:
+        raise HostError("Windows local host runtime is unsupported", "unsupported_platform")
     layout = HostLayout.under(
         root,
         supervisor_command_path=supervisor_command_path,

@@ -43,6 +43,7 @@ from grokctl.models import (
     validate_profile_id,
 )
 from grokctl.profiles import ProfileRegistry, ensure_private_dir
+from grokctl.platform_security import open_nofollow, private_permissions, reject_links, set_private_permissions
 from grokctl.secrets import SecretStatus, SecretStore
 from grokctl.switching import ActivationPlan, SwitchError
 
@@ -95,14 +96,14 @@ class GrokctlService:
                 event[key] = value
         line = json.dumps(event, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
         ensure_private_dir(self.home)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
         try:
-            fd = os.open(str(self.activity_path), flags, 0o600)
+            fd = open_nofollow(self.activity_path, flags)
         except OSError as exc:
             raise ValidationError("活动记录文件不安全") from exc
         try:
+            set_private_permissions(self.activity_path, fd=fd)
             os.write(fd, line.encode("ascii"))
-            os.fchmod(fd, 0o600)
         finally:
             os.close(fd)
 
@@ -633,6 +634,10 @@ class GrokctlService:
             raise ValidationError("limit 必须是 1 到 1000 的整数")
         events: list[dict[str, object]] = []
         try:
+            reject_links(self.activity_path)
+        except OSError as exc:
+            raise ValidationError("活动记录文件不安全") from exc
+        try:
             st = os.lstat(self.activity_path)
         except FileNotFoundError:
             return {"schemaVersion": SCHEMA_VERSION, "events": []}
@@ -640,10 +645,10 @@ class GrokctlService:
             raise ValidationError("活动记录文件不能是符号链接")
         if not stat.S_ISREG(st.st_mode):
             raise ValidationError("活动记录文件必须是普通文件")
-        if st.st_mode & 0o077:
+        if not private_permissions(self.activity_path, st):
             raise ValidationError("活动记录文件权限必须仅限当前用户")
         try:
-            fd = os.open(str(self.activity_path), os.O_RDONLY | os.O_NOFOLLOW)
+            fd = open_nofollow(self.activity_path, os.O_RDONLY)
         except OSError as exc:
             raise ValidationError("活动记录文件不安全") from exc
         try:

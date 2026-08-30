@@ -9,7 +9,6 @@ resolver. Lab apply is a synthetic runtime and is not a real supervisor.
 from __future__ import annotations
 
 import errno
-import fcntl
 import json
 import os
 import stat
@@ -29,6 +28,7 @@ from grokctl.models import (
     sha256_hex,
 )
 from grokctl.profiles import ProfileRegistry, atomic_replace, ensure_private_dir
+from grokctl.platform_security import IS_WINDOWS, lock_exclusive, unlock, open_nofollow, private_permissions, reject_links, set_private_permissions
 from grokctl.remote import (
     Clock,
     HostError,
@@ -167,6 +167,10 @@ def _require_absolute_path(value: object, label: str) -> Path:
 
 def _require_existing_dir(path: Path, label: str) -> Path:
     try:
+        reject_links(path)
+    except OSError as exc:
+        raise ValidationError(f"{label}不能是符号链接或重解析点") from exc
+    try:
         st = os.lstat(path)
     except FileNotFoundError as exc:
         raise ValidationError(f"{label}不存在") from exc
@@ -178,6 +182,10 @@ def _require_existing_dir(path: Path, label: str) -> Path:
 
 
 def _require_existing_file(path: Path, label: str) -> Path:
+    try:
+        reject_links(path)
+    except OSError as exc:
+        raise ValidationError(f"{label}不能是符号链接或重解析点") from exc
     try:
         st = os.lstat(path)
     except FileNotFoundError as exc:
@@ -206,6 +214,10 @@ def _parse_digest_list(raw: object, label: str) -> tuple[str, ...]:
 
 def _file_is_private_regular(path: Path, *, missing_ok: bool = False) -> None:
     try:
+        reject_links(path)
+    except OSError as exc:
+        raise ValidationError("主机配置不能是符号链接或重解析点") from exc
+    try:
         st = os.lstat(path)
     except FileNotFoundError:
         if missing_ok:
@@ -215,7 +227,7 @@ def _file_is_private_regular(path: Path, *, missing_ok: bool = False) -> None:
         raise ValidationError("主机配置不能是符号链接")
     if not stat.S_ISREG(st.st_mode):
         raise ValidationError("主机配置必须是普通文件")
-    if st.st_mode & 0o077:
+    if not private_permissions(path, st):
         raise ValidationError("主机配置权限必须仅限当前用户")
 
 
@@ -255,6 +267,8 @@ class HostConfig:
 
 
 def parse_host_config(raw: object) -> HostConfig:
+    if IS_WINDOWS:
+        raise GrokctlError("Windows 客户端不支持本机实验运行时，请连接 Linux 主机", code="unsupported-platform")
     if isinstance(raw, (bytes, bytearray)):
         if len(raw) > MAX_HOST_CONFIG_BYTES:
             raise ValidationError("主机配置过大")
@@ -337,19 +351,23 @@ class ExclusiveLock:
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
-            fd = os.open(str(self.path), flags, 0o600)
+            fd = open_nofollow(self.path, flags)
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise ValidationError("控制面锁不能是符号链接") from exc
             raise ValidationError("无法创建控制面锁") from exc
+        acquired = False
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 raise ValidationError("控制面锁必须是普通文件")
-            os.fchmod(fd, 0o600)
+            set_private_permissions(self.path, fd=fd)
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
+                lock_exclusive(fd)
+                acquired = True
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
                 raise BusyError("控制面正在忙") from exc
             os.lseek(fd, 0, os.SEEK_SET)
             os.ftruncate(fd, 0)
@@ -358,7 +376,8 @@ class ExclusiveLock:
             yield
         finally:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                if acquired:
+                    unlock(fd)
             except OSError:
                 pass
             os.close(fd)
@@ -457,6 +476,8 @@ def hydrate_runtime(runtime: HostRuntime) -> HostRuntime:
 
 
 def build_host_runtime(config: HostConfig) -> HostRuntime:
+    if IS_WINDOWS:
+        raise GrokctlError("Windows 客户端不支持本机实验运行时，请连接 Linux 主机", code="unsupported-platform")
     runtime = build_runtime(
         config.host_root,
         clock=Clock(),

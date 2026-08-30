@@ -7,6 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any
+from grokctl.platform_security import private_permissions, reject_links, set_private_permissions
 
 from grokctl.models import (
     OFFICIAL_ID,
@@ -28,24 +29,29 @@ TMP_PREFIX = ".profiles."
 
 def ensure_private_dir(path: Path) -> Path:
     path = Path(path)
+    try:
+        reject_links(path)
+    except OSError as exc:
+        raise ValidationError("主目录不能是符号链接或重解析点") from exc
     if path.exists() and path.is_symlink():
         raise ValidationError("主目录不能是符号链接")
     path.mkdir(parents=True, exist_ok=True)
     if path.is_symlink() or not path.is_dir():
         raise ValidationError("主目录无效")
-    os.chmod(path, 0o700)
+    set_private_permissions(path, 0o700)
     return path
 
 
 def atomic_replace(path: Path, data: bytes, *, mode: int = 0o600) -> None:
     path = Path(path)
     ensure_private_dir(path.parent)
+    reject_links(path)
     fd, tmp_name = tempfile.mkstemp(prefix=TMP_PREFIX, dir=str(path.parent))
     tmp_path = Path(tmp_name)
     try:
+        set_private_permissions(tmp_path, mode, fd=fd)
         os.write(fd, data)
         os.fsync(fd)
-        os.fchmod(fd, mode)
     except Exception:
         os.close(fd)
         tmp_path.unlink(missing_ok=True)
@@ -53,7 +59,7 @@ def atomic_replace(path: Path, data: bytes, *, mode: int = 0o600) -> None:
     os.close(fd)
     try:
         os.replace(str(tmp_path), str(path))
-        os.chmod(path, mode)
+        set_private_permissions(path, mode)
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
@@ -65,6 +71,10 @@ def _reject_json_constant(_name: str) -> None:
 
 def _file_is_private_regular(path: Path) -> None:
     try:
+        reject_links(path)
+    except OSError as exc:
+        raise ValidationError("配置文件不能是符号链接或重解析点") from exc
+    try:
         st = os.lstat(path)
     except FileNotFoundError:
         return
@@ -72,7 +82,7 @@ def _file_is_private_regular(path: Path) -> None:
         raise ValidationError("配置文件不能是符号链接")
     if not os.path.isfile(path):
         raise ValidationError("配置文件必须是普通文件")
-    if st.st_mode & 0o077:
+    if not private_permissions(path, st):
         raise ValidationError("配置文件权限必须仅限当前用户")
 
 

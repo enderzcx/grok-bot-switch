@@ -17,6 +17,7 @@ from grokctl.models import (
     validate_profile_id,
 )
 from grokctl.profiles import ensure_private_dir
+from grokctl.platform_security import open_nofollow, private_permissions, reject_links, set_private_permissions
 
 
 MAX_SECRET_BYTES = 64 * 1024
@@ -126,6 +127,10 @@ def _read_complete(fd: int, expected: int) -> tuple[bytes, str | None]:
 
 def _reject_unsafe_existing(path: Path) -> None:
     try:
+        reject_links(path)
+    except OSError as exc:
+        raise SecretError("密钥文件不能是符号链接或重解析点") from exc
+    try:
         st = os.lstat(path)
     except FileNotFoundError:
         return
@@ -136,11 +141,11 @@ def _reject_unsafe_existing(path: Path) -> None:
 
 
 def _open_exclusive_temp(directory: Path, prefix: str) -> tuple[int, Path]:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     for _ in range(32):
         candidate = directory / (prefix + os.urandom(8).hex())
         try:
-            fd = os.open(str(candidate), flags, 0o600)
+            fd = open_nofollow(candidate, flags)
         except FileExistsError:
             continue
         except OSError as exc:
@@ -192,11 +197,11 @@ class SecretStore:
         tmp: Path | None = None
         try:
             fd, tmp = _open_exclusive_temp(path.parent, SECRET_TMP_PREFIX)
+            set_private_permissions(tmp, fd=fd)
             _write_all(fd, payload)
             os.fsync(fd)
-            os.fchmod(fd, 0o600)
             st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode) or (st.st_mode & 0o077) or st.st_size != len(payload):
+            if not stat.S_ISREG(st.st_mode) or not private_permissions(tmp, st, fd=fd) or st.st_size != len(payload):
                 raise SecretError("密钥文件不安全")
             os.close(fd)
             fd = None
@@ -224,6 +229,7 @@ class SecretStore:
 
     def remove(self, profile_id: str) -> None:
         path = self.path_for(profile_id)
+        _reject_unsafe_existing(path)
         try:
             st = os.lstat(path)
         except FileNotFoundError:
@@ -236,6 +242,7 @@ class SecretStore:
 
     def quarantine(self, profile_id: str) -> Path | None:
         path = self.path_for(profile_id)
+        _reject_unsafe_existing(path)
         try:
             st = os.lstat(path)
         except FileNotFoundError:
@@ -254,6 +261,8 @@ class SecretStore:
 
     def restore(self, profile_id: str, tombstone: Path) -> None:
         path = self.path_for(profile_id)
+        _reject_unsafe_existing(path)
+        _reject_unsafe_existing(tombstone)
         try:
             st = os.lstat(tombstone)
         except FileNotFoundError as exc:
@@ -269,6 +278,7 @@ class SecretStore:
     def discard_tombstone(self, tombstone: Path | None) -> None:
         if tombstone is None:
             return
+        _reject_unsafe_existing(tombstone)
         try:
             st = os.lstat(tombstone)
         except FileNotFoundError:
@@ -281,6 +291,10 @@ class SecretStore:
         if profile_id == OFFICIAL_ID:
             return SecretStatus(installed=False, required=False)
         path = self.path_for(profile_id)
+        try:
+            _reject_unsafe_existing(path)
+        except SecretError:
+            return SecretStatus(installed=False, required=required, rejected=True, reason="密钥文件不安全")
         try:
             st = os.lstat(path)
         except FileNotFoundError:
@@ -299,7 +313,7 @@ class SecretStore:
                 rejected=True,
                 reason="密钥文件必须是普通文件",
             )
-        if st.st_mode & 0o077:
+        if not private_permissions(path, st):
             return SecretStatus(
                 installed=False,
                 required=required,
@@ -313,9 +327,9 @@ class SecretStore:
                 rejected=True,
                 reason="密钥文件过大",
             )
-        flags = os.O_RDONLY | os.O_NOFOLLOW
+        flags = os.O_RDONLY
         try:
-            fd = os.open(str(path), flags)
+            fd = open_nofollow(path, flags)
         except OSError:
             return SecretStatus(
                 installed=False,
@@ -324,6 +338,8 @@ class SecretStore:
                 reason="密钥文件不安全",
             )
         try:
+            if not private_permissions(path, fd=fd):
+                return SecretStatus(installed=False, required=required, rejected=True, reason="密钥文件权限必须仅限当前用户")
             data, reason = _read_complete(fd, st.st_size)
         finally:
             os.close(fd)
