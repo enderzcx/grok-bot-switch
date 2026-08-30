@@ -50,6 +50,7 @@ python3 -m grokctl --home runtime/operator-state status --json
 - `host configure` 当前只接受 `lab-local-root`，明确显示 `lab-synthetic`；默认禁止模拟 apply。即使测试显式开启模拟 apply，也不会重启真实 Grok Bot。
 - `switch-back`（兼容别名 `rollback`）校验上一份回执/快照后，按当前 profile 重新发起切换，**不是按历史快照原样恢复**。事务执行失败时的内部恢复另有快照保护。
 - `test --live`、`verify --live` 尚未接入，会明确报错。不宣称原生额度为零，也不宣称任何第三方已完成生产兼容验收。
+- 当前单次 host 请求截止时间为 120 秒；成功响应总量上限 64 MiB、单个 SSE 事件 1 MiB。超过限制明确失败，不换供应商重试。
 
 ## 验证与下一阶段
 

@@ -131,6 +131,21 @@
         <label>模型
           <input id="field-model" name="model" required autocomplete="off" spellcheck="false" placeholder="model-name">
         </label>
+        <label>输出上限（Messages 必填）
+          <input id="field-max-tokens" name="maxTokens" type="number" min="1" max="1000000" step="1" placeholder="8192">
+        </label>
+        <label>推理强度（OpenAI 协议）
+          <select id="field-effort" name="reasoningEffort">
+            <option value="">不设置</option>
+            <option value="none">none</option>
+            <option value="minimal">minimal</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+            <option value="max">max</option>
+          </select>
+        </label>
         <label>认证
           <select id="field-auth" name="auth">
             <option value="bearer">bearer</option>

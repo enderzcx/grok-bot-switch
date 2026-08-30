@@ -66,6 +66,8 @@
     fieldProtocol: document.getElementById("field-protocol"),
     fieldBase: document.getElementById("field-base"),
     fieldModel: document.getElementById("field-model"),
+    fieldMaxTokens: document.getElementById("field-max-tokens"),
+    fieldEffort: document.getElementById("field-effort"),
     fieldAuth: document.getElementById("field-auth"),
     fieldAdapter: document.getElementById("field-adapter"),
     fieldSecret: document.getElementById("field-secret"),
@@ -542,6 +544,7 @@
   }
 
   function updatePreview() {
+    els.fieldMaxTokens.required = els.fieldProtocol.value === "anthropic-messages";
     text(els.preview, joinPreview(els.fieldBase.value, els.fieldProtocol.value, els.fieldPath.value));
   }
 
@@ -582,6 +585,8 @@
     els.fieldProtocol.value = item.protocol || "openai-chat";
     els.fieldBase.value = item.baseUrl || "";
     els.fieldModel.value = item.model || "";
+    els.fieldMaxTokens.value = (item.parameters && item.parameters.maxTokens) || "";
+    els.fieldEffort.value = (item.parameters && item.parameters.reasoningEffort) || "";
     var authType = item.authType || (item.auth && item.auth.type) || "bearer";
     els.fieldAuth.value = authType;
     els.adapterWrap.hidden = authType !== "oauth-adapter";
@@ -637,9 +642,14 @@
         typeof editSnapshot.parameters === "object" &&
         !Array.isArray(editSnapshot.parameters)
       ) {
-        profile.parameters = editSnapshot.parameters;
+        profile.parameters = Object.assign({}, editSnapshot.parameters);
       }
     }
+    profile.parameters = profile.parameters || {};
+    if (els.fieldMaxTokens.value) profile.parameters.maxTokens = Number(els.fieldMaxTokens.value);
+    else delete profile.parameters.maxTokens;
+    if (els.fieldEffort.value) profile.parameters.reasoningEffort = els.fieldEffort.value;
+    else delete profile.parameters.reasoningEffort;
     return profile;
   }
 
