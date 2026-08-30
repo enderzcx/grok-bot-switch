@@ -77,4 +77,14 @@ BeefAPI 只用于本轮验收，不在运行包、默认配置或安装提示词
 [CI 33323031919](https://github.com/enderzcx/grok-bot-switch/actions/runs/33323031919) 完成前后端测试、Linux 安装、重复安装复用 PID、状态查询和停止。
 [CI 33323540886](https://github.com/enderzcx/grok-bot-switch/actions/runs/33323540886) 对归档来源再次通过验证。
 最终 ZIP 采用 CI 原始资产；本地在同一编译后前端输入下重建 SHA-256 一致。
-待公开资产上线后再验证公开下载和 Grok Bot 提示词执行，不提前宣称这两个步骤完成。
+
+## 公开发布与提示词执行
+
+- `v0.3.0-beta.1` 于 2026-08-30T16:57:09Z 公开发布，非草稿、预览版；tag 指向 `bc39937c6a7043cf47d07950c31fff50966507cf`。
+- 主分支 [CI 33323785909](https://github.com/enderzcx/grok-bot-switch/actions/runs/33323785909) 成功。
+- 从公开 GitHub 下载地址重新取得 ZIP，SHA-256 与 CI 原件 `299d2864d651764a8197aa6e41d22865cbb2bcd40755bea8ec5bb02947b0ced9` 一致。
+- 将发布页的完整提示词直接发送给新建 Bot，没有上传附件。原版 UI 读回 Bot 的下载/校验过程、`ok: true` 安装结果、云端面板 URL 和面板截图。
+- 本轮属于已有安装上的幂等自安装验证，不冒充全新云端的首装；全新目录安装另由先前的真实 Linux 手动验收和 CI 验证覆盖。
+- 安装完成时 Bot 自己仍在运行，面板正确显示 busy-agent；安装过程没有切换通道或重启主机。服务端读回仍为 official，主进程 PID `892815`、startedAt `1788108777328` 和原厂 SHA-256 未变化，健康、无待处理重启命令。
+- 当前 Grok Bot 云端页面由原版客户端可见，用户在云端浏览器中操作，不在本机浏览器打开云端 loopback 地址。
+- Cua 使用 CLI：本会话无 Cua MCP 可调用工具，已检查已有 MCP 配置后使用 CLI；原版进程未修改。后台输入为默认，个别无响应的菜单/远程桌面点击使用了有界前台递送，没有使用脚本绕过 GUI 控制。
