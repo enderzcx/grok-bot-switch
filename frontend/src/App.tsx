@@ -223,8 +223,12 @@ export default function App() {
     if (next.status === "verified") {
       const readback = current.activation;
       if (
-        nativeReady(current) &&
-        !current.blocking.length &&
+        nativeAttached(current) &&
+        current.client?.connected === true &&
+        current.client.hostReachable === true &&
+        current.host.wired &&
+        current.blocking.every((code) => code === "busy-agent") &&
+        (current.client.providerSwitchReady || current.blocking.includes("busy-agent")) &&
         current.activeProfile === next.target &&
         readback?.id === next.id &&
         readback.status === "verified" &&

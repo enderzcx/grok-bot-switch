@@ -96,14 +96,60 @@ def install(archive, expected, root):
                         stream.write(bundle.read(member))
                     path.chmod(0o600)
                 os.rename(staging, target)
+    # Retain the checksum-bound original so a later `start` can revalidate all
+    # extracted sources without trusting the directory name or a mutable manifest.
+    from grokctl.profiles import atomic_replace, _file_is_private_regular
+    cached = private_dir(root / "archives") / (expected + ".zip")
+    if cached.exists() or cached.is_symlink():
+        _file_is_private_regular(cached)
+        if cached.stat().st_size != len(data) or cached.read_bytes() != data:
+            raise InstallError("cached-archive-changed")
+    else:
+        atomic_replace(cached, data)
     return target
 
 
-def running(root):
+def panel_process(root, *, proc_root=Path("/proc")):
+    """Identify our process independently of HTTP availability; never guess dead."""
     path = root / "state/panel.json"
     if not path.exists() and not path.is_symlink():
         return None
     state = read_json(path)
+    pid, package = state.get("pid"), Path(state.get("package", ""))
+    if (type(pid) is not int or pid <= 1 or package.parent != root / "versions"
+            or not re.fullmatch(r"[a-f0-9]{64}", package.name)):
+        raise InstallError("invalid-panel-state")
+    proc = proc_root / str(pid)
+    try:
+        if proc.stat().st_uid != os.getuid():
+            raise InstallError("panel-process-mismatch")
+        fields = (proc / "stat").read_text().rsplit(") ", 1)[1].split()
+        ticks = int(fields[19])
+        if "startedTicks" in state and state["startedTicks"] != ticks:
+            raise InstallError("panel-process-mismatch")
+        if fields[0] == "Z":
+            return None
+        command = (proc / "cmdline").read_bytes().split(b"\0")
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except (OSError, ValueError, IndexError):
+        raise InstallError("panel-process-unconfirmed") from None
+    if command and command[-1] == b"":
+        command.pop()
+    expected = [b"-I", str(package / "ops/independent.py").encode(), b"serve",
+                b"--root", str(root).encode(), b"--port"]
+    if (len(command) != 8 or command[1:7] != expected
+            or command[7] not in (b"0", str(state.get("port")).encode())):
+        raise InstallError("panel-process-mismatch")
+    # v0.3.0-beta.1 descriptors lack start ticks. Exact command/root/uid checks
+    # retain the ability to stop that version during an upgrade.
+    return state
+
+
+def running(root):
+    state = panel_process(root)
+    if state is None:
+        return None
     port = state.get("port")
     if type(port) is not int or not 1 <= port <= 65535:
         raise InstallError("invalid-state")
@@ -124,10 +170,18 @@ def running(root):
 
 
 def start(root, package, port):
-    state = running(root)
+    if package.parent != root / "versions" or not re.fullmatch(r"[a-f0-9]{64}", package.name):
+        raise InstallError("invalid-package-path")
+    cached = root / "archives" / (package.name + ".zip")
+    if not cached.exists():
+        raise InstallError("verified-archive-missing-reinstall")
+    install(cached, package.name, root)
+    state = panel_process(root)
     if state:
         if state.get("package") != str(package):
             raise InstallError("stop-panel-before-upgrade")
+        if running(root) is None:
+            raise InstallError("panel-unhealthy-stop-before-start")
         return state
     log = root / "panel.log"
     fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
@@ -171,26 +225,21 @@ def serve(root, port):
         service.panel_instance_id = secrets.token_hex(32)
         with ProviderPanel(service, port=port) as panel:
             atomic_replace(home / "panel.json", json.dumps({"pid": os.getpid(), "port": panel.port,
-                "url": panel.url, "instanceId": service.panel_instance_id, "package": str(PACKAGE)}).encode())
+                "url": panel.url, "instanceId": service.panel_instance_id, "package": str(PACKAGE),
+                "startedTicks": int(Path("/proc/self/stat").read_text().rsplit(") ", 1)[1].split()[19])}).encode())
             stopped.wait()
 
 
 def stop(root):
-    state = running(root)
+    state = panel_process(root)
     if not state:
         return {"running": False}
-    pid = state.get("pid")
-    if type(pid) is not int or pid <= 1:
-        raise InstallError("invalid-panel-pid")
-    command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-    expected = [str(Path(state["package"]) / "ops/independent.py").encode(), b"serve",
-                b"--root", str(root).encode(), b"--port", str(state["port"]).encode()]
-    # The requested port may be zero, so check the fixed prefix, not the actual bound port.
-    if command[2:7] != expected[:5]:
-        raise InstallError("panel-process-mismatch")
-    os.kill(pid, signal.SIGTERM)
+    try:
+        os.kill(state["pid"], signal.SIGTERM)
+    except ProcessLookupError:
+        pass
     for _ in range(30):
-        if running(root) is None:
+        if panel_process(root) is None:
             return {"running": False}
         time.sleep(0.1)
     raise InstallError("panel-stop-unconfirmed")
@@ -224,11 +273,13 @@ def main():
             digest = read_json(root / "current.json").get("sha256")
             if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
                 raise InstallError("invalid-state")
-            result = start(root, private_dir(root / "versions" / digest), args.port)
+            result = start(root, root / "versions" / digest, args.port)
         elif args.action == "stop":
             result = stop(root)
         else:
-            result = running(root) or {"running": False}
+            state = panel_process(root)
+            result = {**(state or {}), "running": state is not None,
+                      "healthy": running(root) is not None if state else False}
     print(json.dumps({"ok": True, "mode": "independent", "hostModified": False, **result}))
 
 

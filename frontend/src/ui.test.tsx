@@ -495,6 +495,25 @@ const advance = (ms: number) =>
   act(async () => {
     await vi.advanceTimersByTimeAsync(ms);
   });
+
+test.each(["busy-agent", "active-state-drift"])(
+  "verified receipt remains committed only for transient busy, not drift: %s", async (blocker) => {
+    const current = nativeStatus({ ...pendingActivation, status: "verified" }, profile.id);
+    current.connectionMode = "independent";
+    current.blocking = [blocker];
+    current.client!.providerSwitchReady = false;
+    vi.mocked(fetch).mockImplementation(async (url) =>
+      url === "/api/providers" ? json({ providers: [profile] }) : json(current));
+    render(<App />);
+    await screen.findByText("独立模式 · 暂不可切换");
+    if (blocker === "busy-agent") {
+      expect(screen.queryByText(/尚未确认目标通道已生效/)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "使用中" })).toBeDisabled();
+    } else {
+      expect(screen.getByText(/尚未确认目标通道已生效/)).toBeInTheDocument();
+    }
+    expect(vi.mocked(fetch).mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
+  });
 const click = (name: string) =>
   act(async () => {
     fireEvent.click(screen.getByRole("button", { name }));

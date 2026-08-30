@@ -24,6 +24,8 @@ jobs:
       - run: python3 -m unittest discover -s tests
       - run: node --test tests/*.test.mjs
       - run: python3 desktop/build_independent_bundle.py --output runtime/independent-delivery
+      - name: Verify published prompt matches this exact bundle
+        run: cmp runtime/independent-delivery/INSTALL-WITH-GROK.md docs/install-with-grok.md
       - name: Isolated Linux install, idempotence and stop
         shell: bash
         run: |
