@@ -9,8 +9,8 @@ not_complete_for: native Gemini generateContent, local-machine-to-cloud tunnelin
 verification_level: local
 real_smoke_status: requires_approval
 review_status: not_reviewed
-reviewer: none
-review_command: pending implementation diff
+reviewer: Grok independent review with Codex verification
+review_command: fixed diff 0b4c300...3bec3f8, job 20260830-094414-continue-45ac4a67
 review_notes: Grok builders implement isolated slices; Codex owns integration and an independent structural review before promotion.
 review_owner: Ender
 review_due: 2026-09-06
@@ -36,6 +36,23 @@ memory_review_due: event:owner-acceptance
 ---
 
 # grokctl Provider Switcher v0.1 AI-Implementable PRD
+
+## Implementation Status — 2026-08-30
+
+This remains the full v0.1 implementation contract, not a claim that the whole
+product is finished. The integrated local preview implements profiles/secrets,
+three protocols, transaction logic, a pinned host patch compiler, CLI and UI.
+The service runtime is explicitly `lab-local-root` / `lab-synthetic`; apply is
+disabled by default. A real SSH/cloud-host executor is still an implementation
+gap, not merely an approval gate. Live provider validation and provider-owned
+OAuth adapters are also unimplemented. See `provider-switcher-local-evidence.md`
+for tested boundaries and remaining work.
+
+The public recovery action is now named `switch-back`; `rollback` remains a CLI
+compatibility alias. It validates the prior snapshot/receipt then starts a new
+switch using the current profile. It does not restore the exact historical
+snapshot. Automatic transaction-failure recovery remains a distinct internal
+snapshot operation. Do not describe the public action as exact restoration.
 
 ## 1. Alignment Snapshot
 
