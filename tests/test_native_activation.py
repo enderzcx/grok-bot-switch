@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from grokctl.models import official_profile
 from ops import native_activation as na
+from ops.native_controller import NativeHost
 
 
 def digest(path):
@@ -58,7 +59,8 @@ class FakeHost:
         ok = (not self.command.exists() and id in self.acked and self.last == {"id": id, "kind": "restart"}
               and self.pid != previous["pid"] and self.started > previous["startedAt"] and self.healthy
               and observed["hostBundleSha256"] == previous["hostBundleSha256"])
-        return {"verified": ok, "acknowledgedAtMs": self.acked.get(id), "observation": observed}
+        return {"verified": ok, "acknowledgedAtMs": self.acked.get(id),
+                "acknowledgementPresent": id in self.acked, "observation": observed}
 
 
 class FakeHops:
@@ -288,6 +290,166 @@ class NativeActivationTests(unittest.TestCase):
         self.assertEqual(self.tree(), before)
         self.host.consume()
         self.assertTrue(self.engine.progress()["verified"])
+
+    def test_proven_prepublication_failure_restores_owned_files_and_allows_new_attempt(self):
+        error = na.NativeControllerError("supervisor-source-mismatch", publication="unpublished")
+        with patch.object(self.host, "issue_restart", side_effect=error):
+            result = self.engine.begin(profile(), secret=self.secret)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(self.entry.read_bytes(), b"synthetic stock")
+        self.assertFalse(self.engine.config.exists())
+        self.assertFalse(self.host.command.exists())
+        self.assertEqual(len(self.hops.stopped), 1)
+        job = json.loads(self.engine.job_path.read_text())
+        self.assertEqual(job["restartPublication"], "unpublished")
+        self.assertEqual(job["recoveryAttempts"], 1)
+        self.assertEqual(self.engine.begin(profile(), secret=self.secret)["status"], "pending")
+        self.assertEqual(len(self.host.issued), 1)
+
+    def test_real_controller_source_pin_failure_is_recoverable_before_publication(self):
+        native = NativeHost(root=self.root, host_entry=self.entry,
+            supervisor_source=self.base / "missing-supervisor.mjs", supervisor_dir=self.base / "supervisor")
+        with patch.object(self.host, "issue_restart", side_effect=native.issue_restart):
+            result = self.engine.begin(profile(), secret=self.secret)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(json.loads(self.engine.job_path.read_text())["restartPublication"], "unpublished")
+        self.assertEqual(self.entry.read_bytes(), b"synthetic stock")
+        self.assertFalse(self.engine.config.exists())
+        self.assertFalse(self.host.command.exists())
+
+    def fail_publication_while_busy(self):
+        def fail(id, expected):
+            self.host.busy = True
+            raise na.NativeControllerError("host-not-healthy-idle", publication="unpublished")
+        with patch.object(self.host, "issue_restart", side_effect=fail):
+            result = self.engine.begin(profile(), secret=self.secret)
+        self.assertEqual(result["status"], "needs-attention")
+        self.assertEqual(json.loads(self.engine.job_path.read_text())["restartPublication"], "unpublished")
+        return result
+
+    def test_unpublished_busy_race_recovers_once_later_idle_without_reissuing(self):
+        self.fail_publication_while_busy()
+        before = self.tree()
+        for _ in range(3):
+            self.assertEqual(self.engine.progress()["error"], "recovery-waiting-idle")
+            self.assertEqual(self.tree(), before)
+        self.host.busy = False
+        self.assertEqual(self.engine.progress()["status"], "failed")
+        self.assertEqual(self.entry.read_bytes(), b"synthetic stock")
+        self.assertFalse(self.engine.config.exists())
+        self.assertEqual(self.host.issued, [])
+        self.assertEqual(len(self.hops.stopped), 1)
+
+    def test_unpublished_recovery_refuses_any_ack_last_command_or_identity_drift(self):
+        self.fail_publication_while_busy()
+        self.host.busy = False
+        job = json.loads(self.engine.job_path.read_text())
+        original_pid, original_started = self.host.pid, self.host.started
+        changes = {
+            "invalid-ack-exists": lambda: self.host.acked.update({job["id"]: None}),
+            "last-command": lambda: setattr(self.host, "last", {"id": "foreign", "kind": "restart"}),
+            "pid": lambda: setattr(self.host, "pid", original_pid + 1),
+            "started": lambda: setattr(self.host, "started", original_started + 1),
+        }
+        for name, change in changes.items():
+            with self.subTest(name=name):
+                change()
+                before = self.tree()
+                result = self.engine.progress()
+                self.assertEqual(result["status"], "needs-attention")
+                self.assertEqual(self.tree(), before)
+                self.host.acked.clear()
+                self.host.last = None
+                self.host.pid, self.host.started = original_pid, original_started
+        self.assertEqual(self.hops.stopped, [])
+
+    def test_unpublished_recovery_never_mutates_pending_command_or_foreign_files(self):
+        self.fail_publication_while_busy()
+        self.host.busy = False
+        self.host.command.write_text('{"id":"foreign","kind":"upgrade"}')
+        before = self.tree()
+        self.assertEqual(self.engine.progress()["error"], "foreign-command-pending")
+        self.assertEqual(self.tree(), before)
+        self.host.command.unlink()  # simulated native consumer, never controller
+        self.entry.write_bytes(b"FOREIGN_BUNDLE")
+        before = self.tree()
+        self.assertEqual(self.engine.progress()["status"], "needs-attention")
+        self.assertEqual(self.tree(), before)
+
+    def test_unpublished_proof_survives_crash_before_recovery(self):
+        error = na.NativeControllerError("supervisor-source-mismatch", publication="unpublished")
+        with patch.object(self.host, "issue_restart", side_effect=error), patch.object(self.engine, "_precommand_failure", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                self.engine.begin(profile(), secret=self.secret)
+        job = json.loads(self.engine.job_path.read_text())
+        self.assertEqual(job["restartPublication"], "unpublished")
+        self.assertEqual(job["phase"], "issuing-restart")
+        self.assertEqual(self.engine.progress()["status"], "failed")
+        self.assertEqual(self.entry.read_bytes(), b"synthetic stock")
+
+    def test_crash_after_intent_without_publication_proof_never_guesses_rollback(self):
+        with patch.object(self.host, "issue_restart", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                self.engine.begin(profile(), secret=self.secret)
+        job = json.loads(self.engine.job_path.read_text())
+        self.assertEqual(job["restartPublication"], "intent")
+        self.clock.return_value += 61
+        before = self.tree()
+        self.assertEqual(self.engine.progress()["status"], "needs-attention")
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(self.hops.stopped, [])
+
+    def test_failed_link_with_unknown_outcome_never_counts_as_unpublished(self):
+        error = na.NativeControllerError("command-publish-failed")
+        with patch.object(self.host, "issue_restart", side_effect=error):
+            result = self.engine.begin(profile(), secret=self.secret)
+        self.assertEqual(result["error"], "restart-outcome-uncertain")
+        self.clock.return_value += 61
+        before = self.tree()
+        self.assertEqual(self.engine.progress()["status"], "needs-attention")
+        self.assertEqual(self.tree(), before)
+
+    def test_unpublished_recovery_attempts_are_bounded(self):
+        self.fail_publication_while_busy()
+        self.host.busy = False
+        self.hops.stop_result = {"stopped": False, "reason": "cleanup-pending"}
+        for _ in range(na.MAX_RECOVERY_ATTEMPTS):
+            self.assertEqual(self.engine.progress()["status"], "needs-attention")
+        before = self.tree()
+        self.assertEqual(self.engine.progress()["error"], "recovery-budget-exhausted")
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(len(self.hops.stopped), na.MAX_RECOVERY_ATTEMPTS)
+
+    def test_new_command_during_rollback_stops_before_next_file_write(self):
+        self.fail_publication_while_busy()
+        self.host.busy = False
+        real_replace = na._replace
+        def command_after_bundle(path, data, expected, mode=0o600):
+            result = real_replace(path, data, expected, mode)
+            if path == self.entry:
+                self.host.command.write_text('{"id":"foreign","kind":"upgrade"}')
+            return result
+        installed_config = self.engine.config.read_bytes()
+        with patch.object(na, "_replace", side_effect=command_after_bundle):
+            self.assertEqual(self.engine.progress()["status"], "needs-attention")
+        self.assertEqual(self.engine.config.read_bytes(), installed_config)
+        self.assertEqual(self.hops.stopped, [])
+        before = self.tree()
+        self.assertEqual(self.engine.progress()["error"], "foreign-command-pending")
+        self.assertEqual(self.tree(), before)
+
+    def test_begin_and_plan_cannot_bypass_stale_active_host_identity(self):
+        self.activate()
+        pid, started = self.host.pid, self.host.started
+        for key, value in (("pid", pid + 1), ("started", started + 100)):
+            setattr(self.host, key, value)
+            before = self.tree()
+            for operation in (lambda: self.engine.plan(profile("second")),
+                              lambda: self.engine.begin(profile("second"), secret=self.secret)):
+                with self.assertRaisesRegex(na.ActivationError, "active-state-drift"):
+                    operation()
+            self.assertEqual(self.tree(), before)
+            self.host.pid, self.host.started = pid, started
 
     def test_mismatched_hop_health_never_commits_or_stops_old_hop(self):
         self.activate()

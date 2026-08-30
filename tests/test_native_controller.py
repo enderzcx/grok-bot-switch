@@ -10,6 +10,7 @@ import urllib.request
 import uuid
 
 from ops import native_controller as nc
+from ops import native_hop
 
 
 class Response:
@@ -66,7 +67,7 @@ class NativeControllerTests(unittest.TestCase):
         self.opener = Opener()
         self.native = nc.NativeHost(root=self.base / "project", host_entry=self.host,
             gateway_path=self.gateway, supervisor_dir=self.supervisor, opener=self.opener,
-            proc_root=self.proc, supervisor_source=self.source)
+            proc_root=self.proc, supervisor_source=self.source, listener_owner=self.owns_listener)
         self.request_id = "gbs-" + str(uuid.uuid4())
         self.set_gateway()
         self.status(None, None)
@@ -77,6 +78,18 @@ class NativeControllerTests(unittest.TestCase):
         proc = self.proc / str(pid)
         proc.mkdir(parents=True, exist_ok=True)
         (proc / "cmdline").write_bytes(b"/usr/bin/node\0" + str(self.host).encode() + b"\0")
+        (proc / "fd").mkdir(exist_ok=True)
+        (proc / "net").mkdir(exist_ok=True)
+        socket_fd = proc / "fd" / "5"
+        if socket_fd.is_symlink():
+            socket_fd.unlink()
+        socket_fd.symlink_to(f"socket:[{pid}001]")
+        (proc / "net" / "tcp").write_text(f"0: 0100007F:49C0 00000000:0000 0A 0:0 0:0 0 1000 0 {pid}001\n")
+
+    def owns_listener(self, pid, port):
+        # Exercise the actual shared parser against a synthetic proc tree.
+        with patch.object(native_hop, "Path", side_effect=lambda value: self.proc if str(value) == "/proc" else Path(value)):
+            return native_hop.owns_listener(pid, port)
 
     def status(self, id, kind):
         (self.supervisor / "status.json").write_text(json.dumps({"lastCommandId": id,
@@ -142,6 +155,30 @@ class NativeControllerTests(unittest.TestCase):
     def test_gateway_change_during_health_is_not_healthy(self):
         self.opener.on_open = lambda: self.set_gateway(124, 200)
         self.assertFalse(self.native.read_observation()["health"])
+
+    def test_health_listener_requires_matching_pid_socket_inode_port_and_state(self):
+        tcp = self.proc / "123" / "net" / "tcp"
+        original = tcp.read_text()
+        for line in (original.replace("123001", "999999"), original.replace("49C0", "49C1"),
+                     original.replace("0100007F", "00000000"), original.replace(" 0A ", " 01 ")):
+            with self.subTest(line=line):
+                tcp.write_text(line)
+                self.opener.calls.clear()
+                self.assertFalse(self.native.read_observation()["health"])
+                self.assertEqual(self.opener.calls, [])
+        tcp.write_text(original)
+        self.assertTrue(self.native.read_observation()["health"])
+        self.opener.on_open = lambda: (self.proc / "123" / "fd" / "5").unlink()
+        self.assertFalse(self.native.read_observation()["health"], "ownership loss during HTTP must invalidate its body")
+
+    def test_health_requires_a_real_busy_boolean_even_for_receipts(self):
+        old = self.native.read_observation()
+        self.native.issue_restart(self.request_id, old)
+        self.finish()
+        for value in ({}, {"isBusy": None}, {"isBusy": 0}, {"isBusy": "false"}):
+            self.opener.response = Response(value)
+            self.assertFalse(self.native.read_observation()["health"])
+            self.assertFalse(self.native.restart_receipt(self.request_id, old)["verified"])
 
     def test_pending_and_last_command_are_sanitized_to_two_fields(self):
         self.native.command_path.write_text(json.dumps({"id": "foreign", "kind": "upgrade",
@@ -256,6 +293,7 @@ class NativeControllerTests(unittest.TestCase):
             ack.write_text(value)
             result = self.native.restart_receipt(self.request_id, old)
             self.assertIsNone(result["acknowledgedAtMs"])
+            self.assertTrue(result["acknowledgementPresent"])
             self.assertNotIn("PRIVATE_SECRET", json.dumps(result))
     def test_failed_publish_reports_fixed_error_and_removes_only_own_temp(self):
         old = self.native.read_observation()
@@ -267,6 +305,27 @@ class NativeControllerTests(unittest.TestCase):
         self.assertFalse(self.native.command_path.exists())
         self.assertFalse(list(self.supervisor.glob(".gbs-command-*")))
         self.assertEqual(unrelated.read_bytes(), b"KEEP")
+
+    def test_error_publication_proof_distinguishes_preflight_staging_and_link(self):
+        old = self.native.read_observation()
+        self.opener.response = Response({"isBusy": True})
+        with self.assertRaises(nc.NativeControllerError) as caught:
+            self.native.issue_restart(self.request_id, old)
+        self.assertEqual(caught.exception.publication, "unpublished")
+        self.opener.response = Response({"isBusy": False})
+        with patch.object(nc.tempfile, "mkstemp", side_effect=OSError("PRIVATE_SECRET")):
+            with self.assertRaises(nc.NativeControllerError) as caught:
+                self.native.issue_restart(self.request_id, old)
+        self.assertEqual(caught.exception.publication, "unpublished")
+        real_link = nc.os.link
+        def publish_then_error(*args, **kwargs):
+            real_link(*args, **kwargs)
+            raise OSError("uncertain remote filesystem result")
+        with patch.object(nc.os, "link", side_effect=publish_then_error):
+            with self.assertRaises(nc.NativeControllerError) as caught:
+                self.native.issue_restart(self.request_id, old)
+        self.assertEqual(caught.exception.publication, "uncertain")
+        self.assertEqual(json.loads(self.native.command_path.read_text())["id"], self.request_id)
 
     def test_id_validation_reuse_and_errors_do_not_leak(self):
         old = self.native.read_observation()

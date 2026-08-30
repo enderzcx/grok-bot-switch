@@ -21,6 +21,7 @@ import uuid
 from grokctl.models import parse_profile, canonical_dumps
 from grokctl.platform_security import reject_links
 from ops import provider_hop
+from ops.native_controller import NativeControllerError
 
 
 KNOWN_STOCK_SHA256 = frozenset({
@@ -30,6 +31,7 @@ KNOWN_STOCK_SHA256 = frozenset({
 HANDLE_KEYS = ("pid", "port", "generation", "profileDigest", "configPath", "configDigest", "startedTicks")
 RESTART_GRACE_MS = 60_000
 ACK_CLOCK_TOLERANCE_MS = 5_000
+MAX_RECOVERY_ATTEMPTS = 2
 
 
 class ActivationError(RuntimeError):
@@ -192,6 +194,7 @@ class NativeActivation:
         if job and job.get("status") not in ("verified", "failed"):
             raise ActivationError("activation-in-progress")
         if active is not None and (active.get("verified") is not True or current["hostBundleSha256"] != active.get("hostBundleSha256")
+                       or any(current.get(key) != active.get(key) for key in ("pid", "startedAt"))
                        or _digest(self.config) != active.get("configDigest")):
             raise ActivationError("active-state-drift")
         if active is None and current["hostBundleSha256"] != self.stock_sha:
@@ -338,21 +341,46 @@ class NativeActivation:
                 expected = self._fence(job, job["targetBundleHash"], job["targetConfigHash"])
                 job["restartPrevious"] = expected
                 job["restartIssuedAtMs"] = int(time.time() * 1000)
+                job["restartPublication"] = "intent"
                 job["phase"] = "issuing-restart"
                 self._save(self.job_path, job)
-                self.host.issue_restart(job["id"], expected)
+                try:
+                    self.host.issue_restart(job["id"], expected)
+                except NativeControllerError as error:
+                    if error.publication == "unpublished":
+                        # Durable proof precedes rollback. An intent left by a
+                        # crash, or any uncertain link outcome, is NOT proof.
+                        job["restartPublication"] = "unpublished"
+                        self._save(self.job_path, job)
+                    raise
+                job["restartPublication"] = "published"
                 job["phase"] = "awaiting-restart"
                 self._save(self.job_path, job)
                 return self._public(job)
             except Exception:
                 return self._precommand_failure(job)
 
+    def _rollback_fence(self, job, bundle_hash, config_hash):
+        receipt = self.host.restart_receipt(job["id"], job.get("restartPrevious") or job["previous"])
+        current = receipt["observation"]
+        self._idle(current)
+        if (receipt.get("status") == "pending" or receipt.get("acknowledgementPresent") is not False
+                or receipt.get("acknowledgedAtMs") is not None
+                or (current.get("supervisorLastCommand") or {}).get("id") == job["id"]
+                or current.get("supervisorLastCommand") != job["previous"].get("supervisorLastCommand")):
+            raise ActivationError("restart-evidence-present")
+        if any(current.get(key) != job["previous"][key] for key in ("pid", "startedAt")):
+            raise ActivationError("host-identity-changed")
+        if (current.get("hostBundleSha256") != bundle_hash or _digest(self.host.host_entry) != bundle_hash
+                or _digest(self.config) != config_hash):
+            raise ActivationError("file-drift")
+
     def _precommand_failure(self, job):
         failed_phase = job["phase"]
+        recovery_started = False
         job.update(status="needs-attention", error="activation-step-failed", phase=failed_phase)
         try:
-            current = self.host.read_observation()
-            if job.get("restartPrevious") is not None:
+            if job.get("restartPrevious") is not None and job.get("restartPublication") != "unpublished":
                 # Publication can succeed before an exception reaches us. Never
                 # infer that a command was not consumed from file absence alone.
                 job["error"] = "restart-outcome-uncertain"
@@ -361,20 +389,27 @@ class NativeActivation:
                 # Without a verified ownership handle, do not retry or kill it.
                 job["error"] = "hop-start-outcome-uncertain"
             else:
-                self._idle(current)
-                if any(current.get(key) != job["previous"][key] for key in ("pid", "startedAt")):
-                    raise ActivationError("host-identity-changed")
                 bundle, config = _digest(self.host.host_entry), _digest(self.config)
                 if bundle not in (job["previous"]["hostBundleSha256"], job["targetBundleHash"]) or config not in (job["previousConfigHash"], job["targetConfigHash"]):
                     raise ActivationError("file-drift")
+                self._rollback_fence(job, bundle, config)
+                attempts = job.get("recoveryAttempts", 0)
+                if type(attempts) is not int or not 0 <= attempts < MAX_RECOVERY_ATTEMPTS:
+                    raise ActivationError("recovery-budget-exhausted")
                 directory = Path(job["directory"])
                 old_bundle = _read(directory / "original-bundle.cjs")
                 old_config = _read(directory / "original-config.json") if job["previousConfigHash"] is not None else None
                 if _sha(old_bundle) != job["previous"]["hostBundleSha256"] or (None if old_config is None else _sha(old_config)) != job["previousConfigHash"]:
                     raise ActivationError("snapshot-drift")
+                job["recoveryAttempts"] = attempts + 1
+                self._save(self.job_path, job)
+                recovery_started = True
                 if bundle != job["previous"]["hostBundleSha256"]:
+                    self._rollback_fence(job, bundle, config)
                     _replace(self.host.host_entry, old_bundle, bundle, job["bundleMode"])
+                    bundle = job["previous"]["hostBundleSha256"]
                 if config != job["previousConfigHash"]:
+                    self._rollback_fence(job, bundle, config)
                     if old_config is None:
                         if _digest(self.config) != job["targetConfigHash"]:
                             raise ActivationError("file-drift")
@@ -382,13 +417,17 @@ class NativeActivation:
                         _sync_dir(self.config.parent)
                     else:
                         _replace(self.config, old_config, config)
+                    config = job["previousConfigHash"]
+                self._rollback_fence(job, bundle, config)
                 if job["newHop"] is not None:
                     stopped = self.hops.stop(job["newHop"])
                     if not isinstance(stopped, dict) or stopped.get("stopped") is not True:
                         raise ActivationError("hop-cleanup-pending")
                 job.update(status="failed", rolledBack=True)
-        except Exception:
+        except Exception as error:
             job["error"] = "recovery-needs-attention"
+            if not recovery_started or (isinstance(error, ActivationError) and str(error) in ("supervisor-command-pending", "restart-evidence-present")):
+                return self._public(job)
         self._save(self.job_path, job)
         return self._public(job)
 
@@ -440,6 +479,15 @@ class NativeActivation:
                 if pending == {"id": job["id"], "kind": "restart"}:
                     return self._public(job, status="pending", phase="awaiting-restart", verified=False)
                 return self._public(job, status="needs-attention", error="foreign-command-pending", verified=False)
+            if job.get("restartPublication") == "unpublished":
+                # One bounded recovery step after an explicitly unpublished
+                # request. Busy/unhealthy/pending observations remain read-only.
+                if current.get("health") is not True or current.get("isBusy") is not False:
+                    return self._public(job, status="needs-attention", error="recovery-waiting-idle", verified=False)
+                attempts = job.get("recoveryAttempts", 0)
+                if type(attempts) is not int or not 0 <= attempts < MAX_RECOVERY_ATTEMPTS:
+                    return self._public(job, status="needs-attention", error="recovery-budget-exhausted", verified=False)
+                return self._precommand_failure(job)
             if job.get("restartPrevious") is None:
                 return self._public(job, status="needs-attention", error="precommand-outcome-uncertain", verified=False)
             try:

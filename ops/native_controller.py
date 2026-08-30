@@ -19,6 +19,8 @@ import time
 import urllib.request
 import uuid
 
+from ops.native_hop import owns_listener
+
 
 SUPERVISOR_SHA256 = "db270383ac06d217c78e6079508b39939b8a9f77dfe3213308e21b5c38a6c330"
 MAX_READ = 64 * 1024
@@ -27,6 +29,11 @@ MAX_SOURCE = 128 * 1024 * 1024
 
 class NativeControllerError(RuntimeError):
     """A fixed, credential-free failure code."""
+
+    def __init__(self, code, *, publication="uncertain"):
+        self.code = code
+        self.publication = publication
+        super().__init__(code)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -85,13 +92,15 @@ class NativeHost:
                  host_entry=Path("/home/box/sand-host/host-main.cjs"),
                  gateway_path=Path("/home/box/sand-data/gateway.json"),
                  supervisor_dir=Path("/tmp/sand-supervisor"), *, opener=None,
-                 proc_root=Path("/proc"), supervisor_source=Path("/usr/local/bin/sand-supervisor.mjs")):
+                 proc_root=Path("/proc"), supervisor_source=Path("/usr/local/bin/sand-supervisor.mjs"),
+                 listener_owner=None):
         self.root = Path(root)
         self.host_entry = Path(host_entry)
         self.gateway_path = Path(gateway_path)
         self.supervisor_dir = Path(supervisor_dir)
         self.proc_root = Path(proc_root)
         self.supervisor_source = Path(supervisor_source)
+        self.listener_owner = listener_owner or owns_listener
         self.opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
     @property
@@ -129,9 +138,15 @@ class NativeHost:
             if not isinstance(result, dict):
                 return False, None
             busy = result.get("isBusy")
-            return True, busy if type(busy) is bool else None
+            return (True, busy) if type(busy) is bool else (False, None)
         except Exception:
             return False, None
+
+    def _owns_health_listener(self, pid, port):
+        try:
+            return self.listener_owner(pid, port) is True
+        except Exception:
+            return False
 
     def read_observation(self) -> dict:
         observed = {"pid": None, "startedAt": None, "hostBundleSha256": None,
@@ -155,9 +170,9 @@ class NativeHost:
         if gateway is not None:
             port, pid, started = gateway
             observed.update(pid=pid, startedAt=started)
-            if self._live(pid):
+            if self._live(pid) and self._owns_health_listener(pid, port):
                 health, busy = self._health(port)
-                if self._gateway() == gateway and self._live(pid):
+                if self._gateway() == gateway and self._live(pid) and self._owns_health_listener(pid, port):
                     observed.update(health=health, isBusy=busy)
         return observed
 
@@ -175,21 +190,27 @@ class NativeHost:
         return self.supervisor_dir / "acks" / re.sub(r"[^a-zA-Z0-9_.-]", "_", request_id)
 
     def issue_restart(self, request_id: str, expected: dict) -> dict:
-        request_id = _request_id(request_id)
-        self._assert_supervisor()
-        current = self.read_observation()
-        if not isinstance(expected, dict) or any(current[key] is None or current[key] != expected.get(key)
-                for key in ("pid", "startedAt", "hostBundleSha256")):
-            raise NativeControllerError("host-observation-changed")
-        if current["health"] is not True or current["isBusy"] is not False:
-            raise NativeControllerError("host-not-healthy-idle")
-        if current["pendingCommand"] is not None or _exists(self.command_path):
-            raise NativeControllerError("supervisor-command-pending")
-        if _exists(self._ack_path(request_id)) or current["supervisorLastCommand"] == {"id": request_id, "kind": "restart"}:
-            raise NativeControllerError("request-id-already-used")
-        command = {"id": request_id, "kind": "restart", "issuedAtMs": time.time_ns() // 1_000_000,
-                   "reason": "grok-bot-switch"}
+        try:
+            request_id = _request_id(request_id)
+            self._assert_supervisor()
+            current = self.read_observation()
+            if not isinstance(expected, dict) or any(current[key] is None or current[key] != expected.get(key)
+                    for key in ("pid", "startedAt", "hostBundleSha256")):
+                raise NativeControllerError("host-observation-changed")
+            if current["health"] is not True or current["isBusy"] is not False:
+                raise NativeControllerError("host-not-healthy-idle")
+            if current["pendingCommand"] is not None or _exists(self.command_path):
+                raise NativeControllerError("supervisor-command-pending")
+            if _exists(self._ack_path(request_id)) or current["supervisorLastCommand"] == {"id": request_id, "kind": "restart"}:
+                raise NativeControllerError("request-id-already-used")
+            command = {"id": request_id, "kind": "restart", "issuedAtMs": time.time_ns() // 1_000_000,
+                       "reason": "grok-bot-switch"}
+        except NativeControllerError as error:
+            raise NativeControllerError(error.code, publication="unpublished") from None
+        except Exception:
+            raise NativeControllerError("restart-preflight-failed", publication="unpublished") from None
         temp_path = None
+        link_attempted = False
         try:
             # A complete fsynced inode is published with link(O_EXCL semantics),
             # never rename-overwrite. The supervisor owns unlinking command.json.
@@ -199,11 +220,14 @@ class NativeHost:
                 stream.write(json.dumps(command, separators=(",", ":")).encode())
                 stream.flush()
                 os.fsync(stream.fileno())
+            link_attempted = True
             os.link(temp_path, self.command_path, follow_symlinks=False)
         except FileExistsError:
-            raise NativeControllerError("supervisor-command-pending") from None
+            raise NativeControllerError("supervisor-command-pending", publication="unpublished") from None
         except Exception:
-            raise NativeControllerError("command-publish-failed") from None
+            # A generic link error may be returned after an uncertain filesystem
+            # outcome. Only failures before entering link prove non-publication.
+            raise NativeControllerError("command-publish-failed", publication="uncertain" if link_attempted else "unpublished") from None
         finally:
             if temp_path is not None:
                 try:
@@ -216,6 +240,7 @@ class NativeHost:
         request_id = _request_id(request_id)
         current = self.read_observation()
         pending = current["pendingCommand"] is not None or _exists(self.command_path)
+        acknowledgement_present = _exists(self._ack_path(request_id))
         acknowledged_at = None
         try:
             timestamp = float(_read(self._ack_path(request_id), 128).decode().strip())
@@ -233,4 +258,5 @@ class NativeHost:
                     and current["hostBundleSha256"] == previous.get("hostBundleSha256")
                     and current["health"] is True)
         return {"id": request_id, "kind": "restart", "status": "pending" if pending else "consumed" if verified else "unverified",
-                "verified": verified, "acknowledgedAtMs": acknowledged_at, "observation": current}
+                "verified": verified, "acknowledgedAtMs": acknowledged_at,
+                "acknowledgementPresent": acknowledgement_present or acknowledged_at is not None, "observation": current}
