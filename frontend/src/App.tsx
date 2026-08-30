@@ -253,6 +253,7 @@ export default function App() {
   }
   async function reload() {
     const seq = ++serial.current;
+    setNotice("");
     setLoading(true);
     setError("");
     try {
@@ -816,6 +817,9 @@ export default function App() {
                     provider={profile}
                     active={
                       !error &&
+                      !loading &&
+                      !busy &&
+                      !connecting &&
                       !isLab &&
                       !job &&
                       !switchErrors[profile.id] &&
