@@ -18,10 +18,10 @@
    `https://github.com/enderzcx/grok-bot-switch/releases/download/v0.3.0-beta.1/GrokBotSwitch-independent.zip`
    只允许 HTTPS 跳转至 GitHub 的发布资产域名。下载失败则停止，不要自行寻找替代实现。
 2. 先用 `sha256sum` 校验，必须精确等于：
-   `1daa13ff0859ab5790e2c2d64b0b1766a78bbf09f76d60963ab4530662bda68a`
+   `299d2864d651764a8197aa6e41d22865cbb2bcd40755bea8ec5bb02947b0ced9`
    在校验通过之前，不得执行 ZIP 内任何代码。
 3. 校验通过后运行（将下载路径替换为实际绝对路径）：
-   `python3 -I /下载实际路径/GrokBotSwitch-independent.zip install --sha256 1daa13ff0859ab5790e2c2d64b0b1766a78bbf09f76d60963ab4530662bda68a`
+   `python3 -I /下载实际路径/GrokBotSwitch-independent.zip install --sha256 299d2864d651764a8197aa6e41d22865cbb2bcd40755bea8ec5bb02947b0ced9`
 4. 只有 JSON 返回 `ok: true` 才算面板安装成功。不要把安装成功说成供应商切换成功。
 5. 在你的云端浏览器打开返回的 `url`，让我从 Grok Bot 的云端桌面操作。
    这是云端的 127.0.0.1，不是我 Windows/Mac 本机的地址，不要让我在本机浏览器打开。
