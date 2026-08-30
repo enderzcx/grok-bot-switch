@@ -19,7 +19,21 @@ var PROVIDER_DIRECT_CONFIG_KEYS = {
   baseUrl: true,
   endpointPath: true,
   generation: true,
-  profileDigest: true
+  profileDigest: true,
+  parameters: true
+};
+var PROVIDER_DIRECT_PARAMETER_KEYS = {
+  reasoningEffort: true,
+  maxTokens: true
+};
+var PROVIDER_DIRECT_REASONING_EFFORTS = {
+  none: true,
+  minimal: true,
+  low: true,
+  medium: true,
+  high: true,
+  xhigh: true,
+  max: true
 };
 var PROVIDER_DIRECT_CREDENTIAL_KEY = /^(api[_-]?key|authorization|auth|token|access[_-]?token|refresh[_-]?token|oauth|cookie|cookies|credential|credentials|key[_-]?file|secret|password|bearer|x[_-]?api[_-]?key)$/i;
 var PROVIDER_DIRECT_PROFILE_ID = /^(?:[a-z]|[a-z][a-z0-9-]{0,61}[a-z0-9])$/;
@@ -545,6 +559,39 @@ function providerDirectJoinUrl(baseUrl, path) {
   return String(baseUrl).replace(/\/+$/, "") + path;
 }
 
+function providerDirectParseParameters(raw, protocol) {
+  if (raw == null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("enabled provider host config is invalid");
+  }
+  var keys = Object.keys(raw);
+  var out = {};
+  for (var i = 0; i < keys.length; i += 1) {
+    var key = keys[i];
+    if (PROVIDER_DIRECT_CREDENTIAL_KEY.test(key) || !PROVIDER_DIRECT_PARAMETER_KEYS[key]) {
+      throw new Error("enabled provider host config is invalid");
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "reasoningEffort")) {
+    var effort = raw.reasoningEffort;
+    if (typeof effort !== "string" || !PROVIDER_DIRECT_REASONING_EFFORTS[effort]) {
+      throw new Error("enabled provider host config is invalid");
+    }
+    if (protocol === "anthropic-messages") {
+      throw new Error("enabled provider host config is invalid");
+    }
+    out.reasoningEffort = effort;
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "maxTokens")) {
+    var tokens = raw.maxTokens;
+    if (typeof tokens !== "number" || !Number.isInteger(tokens) || tokens < 1 || tokens > 1000000) {
+      throw new Error("enabled provider host config is invalid");
+    }
+    out.maxTokens = tokens;
+  }
+  return out;
+}
+
 function providerDirectCopyHeaders(raw) {
   var headers = {};
   if (raw == null) return headers;
@@ -622,7 +669,8 @@ function parseProviderDirectConfig(raw) {
   if (typeof parsed.profileDigest !== "string" || !PROVIDER_DIRECT_DIGEST.test(parsed.profileDigest)) {
     throw new Error("enabled provider host config is invalid");
   }
-  return {
+  var parameters = providerDirectParseParameters(parsed.parameters, parsed.protocol);
+  var parsedConfig = {
     schemaVersion: 1,
     enabled: true,
     mode: "external-only",
@@ -636,6 +684,10 @@ function parseProviderDirectConfig(raw) {
     generation: parsed.generation,
     profileDigest: parsed.profileDigest
   };
+  if (Object.keys(parameters).length > 0) {
+    parsedConfig.parameters = parameters;
+  }
+  return parsedConfig;
 }
 
 function loadProviderDirectConfig() {
@@ -797,6 +849,9 @@ function streamProviderDirect(executor, ctx, invocationId, tools, options) {
         tools: tools,
         stream: true
       };
+      if (config.parameters != null && typeof config.parameters === "object" && !Array.isArray(config.parameters)) {
+        normalized.parameters = providerDirectShallowCopy(config.parameters);
+      }
       if (options != null && options.maxTokens != null) {
         normalized.maxTokens = options.maxTokens;
       }

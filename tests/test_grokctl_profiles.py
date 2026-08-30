@@ -94,10 +94,14 @@ class ProfileValidationTests(IsolatedHomeTest):
             "anthropic-messages": "/messages",
         }
         for protocol, path in expected.items():
+            extra = {}
+            if protocol == "anthropic-messages":
+                extra["parameters"] = {"maxTokens": 128}
             profile = parse_profile(
                 sample_profile(
                     id=protocol.replace("openai-", "p-").replace("anthropic-", "p-"),
                     protocol=protocol,
+                    **extra,
                 )
             )
             self.assertEqual(profile.protocol, Protocol(protocol))
@@ -204,6 +208,39 @@ class ProfileValidationTests(IsolatedHomeTest):
     def test_official_cannot_be_created_from_input(self) -> None:
         with self.assertRaises(ValidationError):
             parse_profile({"schemaVersion": 1, "id": "official", "displayName": "官方 Grok"})
+
+    def test_official_empty_parameters_round_trip_does_not_typeerror(self) -> None:
+        payload = official_profile().to_canonical_dict()
+        try:
+            parsed = parse_profile(payload, allow_official=True)
+        except TypeError:
+            self.fail("official empty parameters raised TypeError")
+        self.assertEqual(parsed.id, "official")
+        self.assertEqual(dict(parsed.parameters), {})
+        with self.assertRaises(ValidationError):
+            parse_profile({**payload, "parameters": {"maxTokens": 8}}, allow_official=True)
+        with self.assertRaises(ValidationError):
+            parse_profile({**payload, "headers": {"x-trace": "1"}}, allow_official=True)
+
+    def test_anthropic_rejects_reasoning_effort_at_validation(self) -> None:
+        with self.assertRaises(ValidationError) as raised:
+            parse_profile(
+                sample_profile(
+                    id="claude-gateway",
+                    protocol="anthropic-messages",
+                    parameters={"reasoningEffort": "high", "maxTokens": 128},
+                )
+            )
+        self.assertIn("reasoningEffort", str(raised.exception))
+        allowed = parse_profile(
+            sample_profile(
+                id="claude-gateway",
+                protocol="anthropic-messages",
+                parameters={"maxTokens": 128},
+            )
+        )
+        self.assertEqual(allowed.parameters, {"maxTokens": 128})
+        self.assertNotIn("reasoningEffort", allowed.parameters)
 
     def test_reasoning_effort_literals(self) -> None:
         for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):

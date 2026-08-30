@@ -831,6 +831,62 @@ test("sets max_tokens only when the executor option is explicit", async () => {
   assert.equal(mod.fetches[0].init.headers["x-grok-request-kind"], "main");
 });
 
+test("parses compiled host parameters and keeps the credential-free whitelist", () => {
+  const withParams = {
+    ...ACTIVE_CONFIG,
+    parameters: { reasoningEffort: "high", maxTokens: 8192 }
+  };
+  const mod = loadModule({ files: { [CONFIG_PATH]: JSON.stringify(withParams) } });
+  const parsed = mod.loadProviderDirectConfig();
+  assert.deepEqual(fromVm(parsed.parameters), { reasoningEffort: "high", maxTokens: 8192 });
+  const extra = loadModule({
+    files: { [CONFIG_PATH]: JSON.stringify({ ...withParams, temperature: 0.2 }) }
+  });
+  assert.throws(() => extra.loadProviderDirectConfig(), /invalid/);
+  const nestedSecret = loadModule({
+    files: { [CONFIG_PATH]: JSON.stringify({ ...ACTIVE_CONFIG, parameters: { apiKey: "sk-test" } }) }
+  });
+  assert.throws(() => nestedSecret.loadProviderDirectConfig(), /invalid/);
+  const unknownParam = loadModule({
+    files: { [CONFIG_PATH]: JSON.stringify({ ...ACTIVE_CONFIG, parameters: { temperature: 1 } }) }
+  });
+  assert.throws(() => unknownParam.loadProviderDirectConfig(), /invalid/);
+});
+
+test("profile maxTokens is the default and executor maxTokens overrides it", async () => {
+  const config = { ...ACTIVE_CONFIG, parameters: { reasoningEffort: "high", maxTokens: 8192 } };
+  function okFetch() {
+    return sseResponse([
+      { id: "chatcmpl-params", choices: [{ index: 0, delta: { content: "ok" } }] },
+      usageChunk("chatcmpl-params"),
+      "data: [DONE]\n\n"
+    ]);
+  }
+  const defaults = withActiveConfig({ config, fetchImpl: async () => okFetch() });
+  const parsed = defaults.loadProviderDirectConfig();
+  await consume(defaults.createProviderDirectPromptSession({ config: parsed }).getExecutor().stream({}, "inv-default", []));
+  assert.equal(JSON.parse(defaults.fetches[0].init.body).max_tokens, 8192);
+  assert.equal(JSON.parse(defaults.fetches[0].init.body).reasoning_effort, "high");
+  const overridden = withActiveConfig({ config, fetchImpl: async () => okFetch() });
+  const parsedOverride = overridden.loadProviderDirectConfig();
+  await consume(
+    overridden.createProviderDirectPromptSession({ config: parsedOverride }).getExecutor().stream({}, "inv-override", [], { maxTokens: 32 })
+  );
+  assert.equal(JSON.parse(overridden.fetches[0].init.body).max_tokens, 32);
+  assert.equal(JSON.parse(overridden.fetches[0].init.body).reasoning_effort, "high");
+});
+
+test("anthropic compiled reasoningEffort fails closed at host config parse", () => {
+  const config = configFor("anthropic-messages", {
+    parameters: { reasoningEffort: "high", maxTokens: 128 }
+  });
+  const mod = loadModule({ files: { [CONFIG_PATH]: JSON.stringify(config) } });
+  assert.throws(() => mod.loadProviderDirectConfig(), /invalid/);
+  const allowed = configFor("anthropic-messages", { parameters: { maxTokens: 128 } });
+  const ok = loadModule({ files: { [CONFIG_PATH]: JSON.stringify(allowed) } });
+  assert.deepEqual(fromVm(ok.loadProviderDirectConfig().parameters), { maxTokens: 128 });
+});
+
 test("POSTs at the exact configured endpointPath", async () => {
   const config = { ...ACTIVE_CONFIG, endpointPath: "/v1/custom/chat" };
   const mod = withActiveConfig({

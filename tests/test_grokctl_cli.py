@@ -266,7 +266,10 @@ class CliTest(unittest.TestCase):
             "msg-one": ("anthropic-messages", "/messages"),
         }
         for profile_id, (protocol, suffix) in mapping.items():
-            result = self.add_profile(id=profile_id, protocol=protocol, displayName=profile_id)
+            extra = {}
+            if protocol == "anthropic-messages":
+                extra["parameters"] = {"maxTokens": 128}
+            result = self.add_profile(id=profile_id, protocol=protocol, displayName=profile_id, **extra)
             self.assertEqual(result.code, 0, result.stdout + result.stderr)
             self.assertTrue(result.json()["resolvedEndpoint"].endswith(suffix))
 

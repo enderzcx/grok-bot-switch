@@ -205,3 +205,70 @@ test("real protocol adapters and session compose a fake-loopback turn for all th
     }
   }
 });
+
+test("compiled host parameters survive parse and real adapters, with executor override", async () => {
+  const cases = [
+    {
+      id: "openai-chat",
+      path: "/chat/completions",
+      stream: "streams/openai-chat/text.sse",
+      parameters: { reasoningEffort: "high", maxTokens: 8192 },
+      assertBody(body, expectedMax) {
+        assert.equal(body.max_tokens, expectedMax);
+        assert.equal(body.reasoning_effort, "high");
+      }
+    },
+    {
+      id: "openai-responses",
+      path: "/responses",
+      stream: "streams/openai-responses/text.sse",
+      parameters: { reasoningEffort: "high", maxTokens: 8192 },
+      assertBody(body, expectedMax) {
+        assert.equal(body.max_output_tokens, expectedMax);
+        assert.deepEqual(body.reasoning, { effort: "high" });
+      }
+    },
+    {
+      id: "anthropic-messages",
+      path: "/messages",
+      stream: "streams/anthropic-messages/text.sse",
+      parameters: { maxTokens: 4096 },
+      assertBody(body, expectedMax) {
+        assert.equal(body.max_tokens, expectedMax);
+        assert.equal(body.thinking, undefined);
+      }
+    }
+  ];
+  for (const spec of cases) {
+    const config = { ...activeConfig(spec.id, spec.path), parameters: spec.parameters };
+    const { context, fetches } = loadSession(config, async () => {
+      let sent = false;
+      return {
+        ok: true,
+        status: 200,
+        headers: { get(name) { return String(name).toLowerCase() === "x-request-id" ? `${spec.id}-req` : null; } },
+        body: {
+          async *[Symbol.asyncIterator]() {
+            if (!sent) {
+              sent = true;
+              yield sseBody(spec.stream);
+            }
+          }
+        }
+      };
+    });
+    const parsed = context.parseProviderDirectConfig(JSON.stringify(config));
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.parameters)), spec.parameters, spec.id);
+    const executor = context.createProviderDirectPromptSession({ config: parsed }).getExecutor([
+      { role: "user", content: "Say hello." }
+    ]);
+    await consume(executor.stream({}, `${spec.id}-params`, []));
+    spec.assertBody(JSON.parse(fetches[0].init.body), spec.parameters.maxTokens);
+    fetches.length = 0;
+    const overrideExecutor = context.createProviderDirectPromptSession({ config: parsed }).getExecutor([
+      { role: "user", content: "Say hello." }
+    ]);
+    await consume(overrideExecutor.stream({}, `${spec.id}-override`, [], { maxTokens: 32 }));
+    spec.assertBody(JSON.parse(fetches[0].init.body), 32);
+  }
+});

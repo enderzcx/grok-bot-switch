@@ -34,6 +34,11 @@ OFFICIAL_PROFILE = {
     "fallbackPolicy": "never",
     "enabled": True,
 }
+# Finite hop timeout aligned with provider-direct host request deadline (120s).
+HOST_HOP_TIMEOUT_SEC = 120
+REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+ALLOWED_PARAMETER_KEYS = frozenset({"reasoningEffort", "maxTokens"})
+ANTHROPIC_PROTOCOL = "anthropic-messages"
 FORBIDDEN_PROFILE_KEYS = frozenset(
     {
         "apikey",
@@ -88,6 +93,35 @@ def _assert_no_secret_material(value: object) -> None:
             _assert_no_secret_material(child)
 
 
+def _compile_parameters(profile: Mapping[str, object], protocol: str) -> Dict[str, object]:
+    raw = profile.get("parameters")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise SwitchError("invalid parameters", "invalid_profile")
+    _assert_no_secret_material(raw)
+    unknown = set(raw) - ALLOWED_PARAMETER_KEYS
+    if unknown:
+        raise SwitchError("unsupported parameter", "invalid_profile")
+    out: Dict[str, object] = {}
+    if "reasoningEffort" in raw:
+        effort = raw["reasoningEffort"]
+        if not isinstance(effort, str) or effort not in REASONING_EFFORTS:
+            raise SwitchError("invalid reasoningEffort", "invalid_profile")
+        if protocol == ANTHROPIC_PROTOCOL:
+            raise SwitchError(
+                "reasoningEffort is unrepresentable for Anthropic Messages",
+                "invalid_profile",
+            )
+        out["reasoningEffort"] = effort
+    if "maxTokens" in raw:
+        tokens = raw["maxTokens"]
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 1 or tokens > 1_000_000:
+            raise SwitchError("invalid maxTokens", "invalid_profile")
+        out["maxTokens"] = tokens
+    return out
+
+
 def normalize_profile(profile: Mapping[str, object]) -> Dict[str, object]:
     if not isinstance(profile, Mapping):
         raise SwitchError("invalid profile", "invalid_profile")
@@ -118,6 +152,7 @@ def normalize_profile(profile: Mapping[str, object]) -> Dict[str, object]:
         except hop.HopError as exc:
             code = "unsafe_header" if "header" in str(exc) else "unsafe_endpoint"
             raise SwitchError(str(exc), code) from exc
+        payload["parameters"] = _compile_parameters(payload, protocol)
     return payload
 
 
@@ -378,7 +413,7 @@ class SwitchEngine:
                 "endpointPath": resolved_path,
                 "authType": auth_type,
                 "headers": dict(profile.get("headers") or {}),
-                "timeoutSec": 5,
+                "timeoutSec": HOST_HOP_TIMEOUT_SEC,
                 "receiptFile": str(self.host.layout.hop_receipt_path),
             }
             if auth_type == "none":
@@ -404,6 +439,9 @@ class SwitchEngine:
                 "generation": generation,
                 "profileDigest": profile_digest(profile),
             }
+            parameters = dict(profile.get("parameters") or {})
+            if parameters:
+                host_config["parameters"] = parameters
             digest = profile_digest(profile)
         staging = self.host.staging_dir(generation) / transaction_id
         snapshot = self.host.snapshot_dir(generation) / transaction_id

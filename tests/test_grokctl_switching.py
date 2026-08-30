@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,6 +27,7 @@ from grokctl.remote import (  # noqa: E402
     sha256_file,
 )
 from grokctl.switching import (  # noqa: E402
+    HOST_HOP_TIMEOUT_SEC,
     ArtifactSet,
     ProfileCatalog,
     SwitchEngine,
@@ -430,6 +432,117 @@ class SwitchTransactionTests(unittest.TestCase):
         with self.assertRaises(SwitchError) as ctx:
             ProfileCatalog.from_mapping({"wrong-key": load_profile("profile-custom-openai.json")})
         self.assertEqual(ctx.exception.code, "invalid_profile")
+
+    def _host_config(self, plan) -> dict:
+        return {key: value for key, value in plan.host_config}
+
+    def _hop_config(self, plan) -> dict:
+        return {key: value for key, value in plan.hop_config}
+
+    def _probe_compiled_host_config(self, host_config: dict, *, executor_max_tokens=None, stream: bool = True) -> dict:
+        node = shutil.which("node")
+        if node is None:
+            raise unittest.SkipTest("node is not available")
+        payload = {
+            "hostConfig": host_config,
+            "executorMaxTokens": executor_max_tokens,
+            "stream": stream,
+        }
+        completed = subprocess.run(
+            [node, str(ROOT / "tests" / "provider_parameters_boundary_probe.cjs")],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(
+                "parameter boundary probe failed:\n" + completed.stdout + completed.stderr
+            )
+        return json.loads(completed.stdout)
+
+    def _anthropic_profile(self, **overrides: object) -> dict:
+        payload = load_profile("profile-custom-openai.json")
+        payload["id"] = "claude-gateway"
+        payload["displayName"] = "Claude Gateway"
+        payload["protocol"] = "anthropic-messages"
+        payload["endpointPath"] = "/messages"
+        payload["auth"] = {"type": "x-api-key", "secretRef": "profile/claude-gateway"}
+        payload["parameters"] = {"maxTokens": 4096}
+        payload.update(overrides)
+        return payload
+
+    def test_plan_preserves_profile_parameters_and_host_deadline_timeout(self) -> None:
+        plan = self.engine.plan("custom-openai")
+        host_config = self._host_config(plan)
+        hop_config = self._hop_config(plan)
+        self.assertEqual(host_config["parameters"], {"maxTokens": 8192, "reasoningEffort": "high"})
+        self.assertEqual(hop_config["timeoutSec"], 120)
+        self.assertEqual(hop_config["timeoutSec"], HOST_HOP_TIMEOUT_SEC)
+        self.assertEqual(HOST_HOP_TIMEOUT_SEC, 120)
+        receipt = self.engine.apply(plan, apply=True)
+        self.assertEqual(receipt.requested_profile, "custom-openai")
+        written = json.loads(self.layout.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(written["parameters"], {"maxTokens": 8192, "reasoningEffort": "high"})
+        self.assertNotIn("apiKey", written)
+        self.assertNotIn("authorization", written)
+
+    def test_profile_parameters_cross_compiled_host_config_and_adapter(self) -> None:
+        plan = self.engine.plan("custom-openai")
+        host_config = self._host_config(plan)
+        probed = self._probe_compiled_host_config(host_config)
+        self.assertEqual(probed["parsed"]["parameters"], {"maxTokens": 8192, "reasoningEffort": "high"})
+        self.assertEqual(probed["adapterBody"]["max_tokens"], 8192)
+        self.assertEqual(probed["adapterBody"]["reasoning_effort"], "high")
+        self.assertEqual(probed["fetchBody"]["max_tokens"], 8192)
+        self.assertEqual(probed["fetchBody"]["reasoning_effort"], "high")
+        overridden = self._probe_compiled_host_config(host_config, executor_max_tokens=32)
+        self.assertEqual(overridden["adapterBody"]["max_tokens"], 32)
+        self.assertEqual(overridden["adapterBody"]["reasoning_effort"], "high")
+        self.assertEqual(overridden["fetchBody"]["max_tokens"], 32)
+        self.assertEqual(overridden["fetchBody"]["reasoning_effort"], "high")
+        written_receipt = self.engine.apply(plan, apply=True)
+        self.assertEqual(written_receipt.requested_profile, "custom-openai")
+        written = json.loads(self.layout.config_path.read_text(encoding="utf-8"))
+        after_apply = self._probe_compiled_host_config(written, executor_max_tokens=64)
+        self.assertEqual(after_apply["fetchBody"]["max_tokens"], 64)
+        self.assertEqual(after_apply["fetchBody"]["reasoning_effort"], "high")
+
+    def test_anthropic_reasoning_effort_fails_closed_at_preflight(self) -> None:
+        bad = self._anthropic_profile(parameters={"reasoningEffort": "high", "maxTokens": 4096})
+        self._write_secret("profile/claude-gateway", "sk-ant-fixture-aaaaaaaa")
+        with self.assertRaises(SwitchError) as ctx:
+            ProfileCatalog.from_mapping(
+                {
+                    "custom-openai": load_profile("profile-custom-openai.json"),
+                    "other-profile": load_profile("profile-other.json"),
+                    "claude-gateway": bad,
+                }
+            )
+        self.assertEqual(ctx.exception.code, "invalid_profile")
+        self.assertIn("reasoningEffort", str(ctx.exception))
+        self.assertNotIn("sk-ant-fixture-aaaaaaaa", str(ctx.exception))
+
+    def test_anthropic_profile_forwards_max_tokens_without_reasoning_effort(self) -> None:
+        profile = self._anthropic_profile()
+        self._write_secret("profile/claude-gateway", "sk-ant-fixture-aaaaaaaa")
+        catalog = ProfileCatalog.from_mapping(
+            {
+                "custom-openai": load_profile("profile-custom-openai.json"),
+                "other-profile": load_profile("profile-other.json"),
+                "claude-gateway": profile,
+            }
+        )
+        engine = SwitchEngine(self.runtime, catalog, self.artifacts)
+        plan = engine.plan("claude-gateway")
+        host_config = self._host_config(plan)
+        self.assertEqual(host_config["parameters"], {"maxTokens": 4096})
+        self.assertNotIn("reasoningEffort", host_config["parameters"])
+        hop_config = self._hop_config(plan)
+        self.assertEqual(hop_config["timeoutSec"], 120)
+        probed = self._probe_compiled_host_config(host_config, stream=False)
+        self.assertEqual(probed["adapterBody"]["max_tokens"], 4096)
+        self.assertNotIn("reasoning_effort", probed["adapterBody"])
 
     def test_catalog_isolates_nested_caller_mutation(self) -> None:
         payload = load_profile("profile-custom-openai.json")

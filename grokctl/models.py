@@ -676,9 +676,9 @@ def _parse_official(mapping: Mapping[str, Any]) -> ProviderProfile:
         auth_raw = _as_mapping(mapping.get("auth"), "auth")
         if auth_raw and auth_raw != {"type": "none"}:
             raise ValidationError("官方通道不能修改")
-    if mapping.get("headers") not in {None, {}}:
+    if mapping.get("headers") not in (None, {}):
         raise ValidationError("官方通道不能修改")
-    if mapping.get("parameters") not in {None, {}}:
+    if mapping.get("parameters") not in (None, {}):
         raise ValidationError("官方通道不能修改")
     if mapping.get("fallbackPolicy") not in {None, FALLBACK_NEVER}:
         raise ValidationError("官方通道不能修改")
@@ -714,6 +714,8 @@ def _parse_external(mapping: Mapping[str, Any], *, profile_id: str) -> ProviderP
     auth = _parse_auth(mapping.get("auth"), profile_id=profile_id, mode=MODE_EXTERNAL)
     headers = _parse_headers(mapping.get("headers"))
     parameters = _parse_parameters(mapping.get("parameters"))
+    if protocol is Protocol.ANTHROPIC_MESSAGES and "reasoningEffort" in parameters:
+        raise ValidationError("anthropic-messages 不支持 reasoningEffort")
     fallback_raw = mapping.get("fallbackPolicy", FALLBACK_NEVER)
     if fallback_raw != FALLBACK_NEVER:
         raise ValidationError("fallbackPolicy 必须是 never")
