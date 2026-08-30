@@ -9,7 +9,7 @@ if (!(Test-Path "grokctl\web\app.js")) { throw "Build frontend first: cd fronten
 if ($LASTEXITCODE -ne 0) { throw "Native bridge build failed" }
 & $Python -m PyInstaller --noconfirm --clean --windowed --name GrokBotSwitch `
   --distpath "$OutputRoot\dist" --workpath "$OutputRoot\work" --specpath "$OutputRoot" `
-  --paths "$projectRoot" --add-data "$projectRoot/grokctl/web;grokctl/web" --add-data "$projectRoot/ops;ops" --add-data "$projectRoot/src;src" `
+  --paths "$projectRoot" --add-data "$projectRoot/grokctl/web;grokctl/web" --add-data "$projectRoot/ops/provider_hop.py;ops" `
   --add-data "$OutputRoot/bridge;bridge" `
   --add-data "$projectRoot/THIRD_PARTY_NOTICES.md;." --add-data "$projectRoot/frontend/licenses;frontend/licenses" --collect-all webview `
   --exclude-module PyQt5 --exclude-module PyQt6 --exclude-module PySide6 desktop/entry.py

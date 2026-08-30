@@ -81,10 +81,14 @@ def self_check() -> dict:
     from grokctl.service import GrokctlService
     from grokctl.ui import start_panel
     from grokctl.native_resources import client_source
+    from grokctl.remote import load_provider_hop
 
     source = client_source()
     if b"INSTALL_HOME_PLACEHOLDER" not in source or b"createHostBridge" not in source:
         raise RuntimeError("packaged native adapter missing")
+    load_provider_hop()
+    if getattr(sys, "frozen", False) and (Path(sys._MEIPASS) / "ops/provision_grok_group_secret.py").exists():
+        raise RuntimeError("lab operator script must not ship")
 
     with tempfile.TemporaryDirectory(prefix="grok-switch-check-") as root:
         service = GrokctlService(Path(root) / "state")
@@ -102,6 +106,7 @@ def self_check() -> dict:
             return {"ok": True, "frozen": bool(getattr(sys, "frozen", False)),
                     "platform": sys.platform, "backend": True, "frontendAssets": True,
                     "nativeAdapter": True,
+                    "providerValidator": True,
                     "windowTested": False, "hostModified": False}
         finally:
             panel.stop()
