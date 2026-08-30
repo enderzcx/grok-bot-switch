@@ -22,12 +22,10 @@ from grokctl.models import parse_profile, canonical_dumps
 from grokctl.platform_security import reject_links
 from ops import provider_hop
 from ops.native_controller import NativeControllerError
+from ops.patch_grok_host_provider_switcher import SUPPORTED_STOCK_SHA256
 
 
-KNOWN_STOCK_SHA256 = frozenset({
-    "0035c31a74ac9d7fc9d93532cf37e217d6074143d46b1eeb3c5e79699df2f88f",
-    "3c3f986e614aaf8fbec642269da40dd20f1dbd9912bdf8f2390bafd61ec684ef",
-})
+KNOWN_STOCK_SHA256 = SUPPORTED_STOCK_SHA256
 HANDLE_KEYS = ("pid", "port", "generation", "profileDigest", "configPath", "configDigest", "startedTicks")
 RESTART_GRACE_MS = 60_000
 ACK_CLOCK_TOLERANCE_MS = 5_000
