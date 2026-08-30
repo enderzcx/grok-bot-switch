@@ -1,4 +1,6 @@
-# grokctl — Grok Bot Provider Switcher
+# Grok Bot Switch
+
+仓库：[`enderzcx/grok-bot-switch`](https://github.com/enderzcx/grok-bot-switch) · CLI：`grokctl` · 状态：本地实验版
 
 一个不绑定供应商的 Grok Bot 通道管理工具：保存任意兼容服务的 URL、模型和 API key，明确选择协议，并在官方通道与外部通道之间规划切换。非 xAI / X 官方项目。
 
