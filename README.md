@@ -36,7 +36,7 @@ python3 -m grokctl --home runtime/operator-state status --json
 | `openai-responses` | `https://api.example.com/v1` | `POST /v1/responses` |
 | `anthropic-messages` | `https://api.example.com/v1` | `POST /v1/messages` |
 
-高级 `endpointPath` 是完整绝对路径覆盖，不是再追加到根地址路径。程序不会猜协议，也不会在协议失败后换另一种重试。具体模型是否支持工具、推理或图像仍取决于供应商能力；不支持的语义应报错，不能假装兼容。
+高级 `endpointPath` 替换协议的默认接口后缀，再追加到根地址路径。例如根地址含 `/v1`、接口路径为 `/custom/chat` 时，最终为 `/v1/custom/chat`；若要完全指定路径，根地址只填域名。query 参数保留在最终 URL 末尾。程序不会猜协议，也不会在协议失败后换另一种重试。具体模型是否支持工具、推理或图像仍取决于供应商能力；不支持的语义应报错，不能假装兼容。
 
 `official` 是内置的原厂通道，不等于 xAI API key 通道。xAI 或任何其他兼容 API 都作为普通自定义 profile 配置。认证支持 `none`、`bearer`、`x-api-key`；`oauth-adapter` 目前仅保留显式契约并阻止未接入的适配器，不接受通用 OAuth token 导入。
 

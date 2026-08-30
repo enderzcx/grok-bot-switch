@@ -143,7 +143,7 @@
     try {
       var url = new URL(base);
       if (url.username || url.password || url.hash || !/^https?:$/.test(url.protocol)) return "请填写有效的根地址";
-      url.pathname = override || url.pathname.replace(/\/+$/, "") + (DEFAULT_PATHS[protocol] || "");
+      url.pathname = url.pathname.replace(/\/+$/, "") + (override || DEFAULT_PATHS[protocol] || "");
       return "POST " + url.href;
     } catch (_error) {
       return "请填写有效的根地址";
