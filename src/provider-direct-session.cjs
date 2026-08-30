@@ -574,15 +574,14 @@ function parseProviderDirectConfig(raw) {
   var parsed = raw;
   if (typeof raw === "string") {
     var trimmed = raw.trim();
-    if (trimmed.length === 0) return null;
+    if (trimmed.length === 0) throw new Error("provider host config is invalid");
     try {
       parsed = JSON.parse(trimmed);
     } catch (_error) {
       throw new Error("enabled provider host config is invalid");
     }
   }
-  if (parsed == null) return null;
-  if (typeof parsed !== "object" || Array.isArray(parsed)) {
+  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("enabled provider host config is invalid");
   }
   var extraKeys = Object.keys(parsed);
@@ -595,7 +594,8 @@ function parseProviderDirectConfig(raw) {
       throw new Error("enabled provider host config is invalid");
     }
   }
-  if (parsed.enabled !== true) return null;
+  if (parsed.enabled === false) return null;
+  if (parsed.enabled !== true) throw new Error("provider host config is invalid");
   providerDirectAssertExact(parsed, "schemaVersion", 1);
   providerDirectAssertExact(parsed, "mode", "external-only");
   providerDirectAssertExact(parsed, "nativeFallback", false);
@@ -814,6 +814,7 @@ function streamProviderDirect(executor, ctx, invocationId, tools, options) {
       try {
         response = await fetch(url, {
           method: "POST",
+          redirect: "error",
           headers: headers,
           body: JSON.stringify(adapterRequest.body),
           signal: hopSignal

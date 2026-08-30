@@ -281,6 +281,13 @@ test("loadProviderDirectConfig returns null when the config is disabled", () => 
   assert.equal(mod.loadProviderDirectConfig(), null);
 });
 
+test("present but malformed activation config never silently enables native inference", () => {
+  for (const raw of ["", " ", "null", "{}", '{"enabled":"true"}', '{"enabled":null}', '{"enabled":0}']) {
+    const mod = loadModule({ files: { [CONFIG_PATH]: raw } });
+    assert.throws(() => mod.loadProviderDirectConfig(), /config is invalid/);
+  }
+});
+
 test("loadProviderDirectConfig throws when an enabled config is invalid", () => {
   const mod = loadModule({
     files: { [CONFIG_PATH]: JSON.stringify({ ...ACTIVE_CONFIG, nativeFallback: true }) }
@@ -332,6 +339,7 @@ test("streams text, usage, metadata, and a stable response", async () => {
   assert.equal(consumed.response.value.messages[0].id, "inv-text");
   assert.deepEqual(fromVm(consumed.response.value.messages[0].content), [{ type: "text", text: "hello world" }]);
   assert.equal(mod.fetches[0].url, CHAT_URL);
+  assert.equal(mod.fetches[0].init.redirect, "error");
   assert.equal(JSON.parse(mod.fetches[0].init.body).stream, true);
   assert.equal(mod.fetches[0].init.headers.authorization, undefined);
   assert.equal(mod.fetches[0].init.headers.Authorization, undefined);
