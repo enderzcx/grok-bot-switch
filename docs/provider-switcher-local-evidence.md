@@ -63,4 +63,38 @@ Codex 已复现并修复：
 - 当前/恢复引用密钥删除和轮换阻止：`9c956d8`，59 个相关测试通过。
 - 公共恢复语义：明确选择新事务 `switch-back`，文档/CLI/UI 都不再宣称 exact restore；快照校验用于历史来源与完整性门槛，不作为实际使用了快照字节的证明。
 
-URL query 拼接及重复 profile canonicalizer 正在独立修复。该记录尚不代表最终 PASS。
+URL query 拼接及重复 profile canonicalizer 已由 Grok `c4b31c4` 修复，整合为 `d3bd3ce`。Codex 独立复跑相关 48 个测试，且重放 query 反例，preview 与 hop 地址已一致。profile schema 统一到 `models.parse_profile` / `official_profile`；独立部署的 hop 保留标准库 URL join，但跨层相等测试和编译时相等断言防止再次漂移。
+
+## 最终本地判定
+
+Codex 判定：**Local preview PASS**。Grok 的原始审查仍记录为对旧 pin 的 REPAIR，不能改写成 Grok 对最终版本签发 PASS。各已接受问题均已逐项修复并独立复验；完整生产版 v0.1 仍未完成。
+
+最终代码 pin：`d3bd3ce`（随后仅补交付文档）。
+
+| Gate | 结果 |
+|---|---|
+| `python3 -m unittest discover -s tests` | 192 pass |
+| `node --test tests/*.test.mjs` | 91 pass |
+| `python3 -m compileall -q grokctl ops` | pass |
+| `node --check grokctl/web/app.js` | pass |
+| `check_delivery_doc.py docs/provider-switcher-v0.1.md` | pass |
+| `git diff --check` | pass |
+| 新增核心路径的 API-key/JWT/private-key pattern 文件名扫描 | 无命中；不替代完整秘密扫描器 |
+
+补充浏览器验收：Messages 缺少输出上限时 `required=true` / `valueMissing=true`，无法提交；填写 8192 后保存并重新编辑，值读回 8192。最终参数表单手机宽度仍为 390/390。测试只保存 synthetic profiles，未发送推理请求。
+
+### Worker commit attribution
+
+| 切片 | Grok 原始提交 | 整合提交 |
+|---|---|---|
+| Provider core | `683de3e`, `f332772` | `4af26af`, `5212f1b` |
+| Protocol adapters | `7798e5c`, `69747d1`, `873b2c6` | `0d2f2c2`, `cf72214`, `8001c12` |
+| Switch runtime | `58311cb`, `8b446d0` | `1b67879`, `5c3ae1d` |
+| Service wiring | `23d68b4`, `978f7e8` | `4dd6888`, `1536b45` |
+| Host executor | `b3e0815`, `d90802a` | `abdac00`, `2b5522a` |
+| UI panel | `fbcc7ac` | `1244f95` |
+| Parameter boundary | `930d678` | `d67a6f8` |
+| Profile edit | `762446d` | `592502b` |
+| Schema / URL repair | `c4b31c4` | `d3bd3ce` |
+
+其它修复与整合提交由 Codex 主代理完成。发布边界：只合并到本地 main 和本机 bare origin；没有 GitHub 发布、CI 运行、生产部署或真实额度证据。

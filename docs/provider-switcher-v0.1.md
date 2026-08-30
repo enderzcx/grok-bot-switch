@@ -11,7 +11,7 @@ real_smoke_status: requires_approval
 review_status: reviewed_with_findings
 reviewer: Grok independent review with Codex verification
 review_command: fixed diff 0b4c300...3bec3f8, job 20260830-094414-continue-45ac4a67
-review_notes: Independent Grok review returned REPAIR; Codex reproduced findings and owns repair verification. See local evidence record; not a release PASS yet.
+review_notes: Independent Grok review returned REPAIR on 3bec3f8; Codex reproduced and repaired accepted findings, verified the final local preview at d3bd3ce with 192 Python and 91 Node tests. Local preview PASS only; full v0.1 and production remain incomplete.
 review_owner: Ender
 review_due: 2026-09-06
 execution_backend: collaborator-assisted
@@ -417,16 +417,16 @@ Implementation stages:
 
 | Criterion | Evidence level | Test or manual evidence | Status | Notes |
 |---|---|---|---|---|
-| Arbitrary valid HTTPS base URL, model, auth type, and secret reference can be saved | local | Profile registry unit tests and CLI fixture | pending | Secret value must be rejected in profile JSON |
-| Resolved method and endpoint are deterministic for all three protocols | fixture | Protocol registry table tests | pending | Explicit path override remains visible |
-| Chat, Responses, and Messages preserve text, tools, continuation ids, usage, and terminal semantics | fixture | Three adapter stream suites | pending | Each suite includes fragmentation and parallel tools where supported |
-| Provider failure never calls official/native inference | local | Injected stock-factory negative assertions | pending | Applies to every request kind |
-| Official mode restores stock bundle and removes external active state | dry-run | Synthetic-host transaction round trip | pending | Production proof remains gated |
-| Secrets never appear in profile, argv, logs, receipts, UI JSON, or git diff | local | Leak scan and negative tests | pending | Fingerprint only |
-| Invalid permissions, symlink secrets, unsafe URLs, unsafe headers, and CR/LF are rejected | local | Security negative suite | pending | Remote HTTP rejected; loopback HTTP allowed |
-| Local panel is loopback-only and mutation endpoints require session/CSRF token | local | HTTP integration tests | pending | No browser secret readback |
-| Unknown Grok Bot bundle hash blocks activation before mutation | dry-run | Patcher/transaction fixture | pending | Produces actionable drift error |
-| Existing BeefAPI production route can be represented as ordinary `openai-chat` profile | fixture | Migration fixture with redacted sample | pending | No BeefAPI name in core contracts |
+| Arbitrary valid HTTPS base URL, model, auth type, and secret reference can be saved | local | Profile registry unit tests, CLI and browser edit fixture | passed | Secret value rejected in profile JSON; active/recovery references protected |
+| Resolved method and endpoint are deterministic for all three protocols | fixture | Cross-layer URL equality tests, including query and path overrides | passed | Explicit path override remains visible |
+| Chat, Responses, and Messages preserve text, tools, continuation ids, usage, and terminal semantics | fixture | Three adapter/session stream suites and compiled-parameter probe | passed | Fragmentation, signed/encrypted continuation and parallel tools covered |
+| Provider failure never calls official/native inference | local | Injected stock-factory negative assertions | passed | Every request kind; malformed present activation config also rejects |
+| Official mode restores stock bundle and removes external active state | dry-run | Synthetic-host transaction round trip and hop cleanup tests | passed | Stored operator keys remain; production proof gated |
+| Secrets never appear in profile, argv, logs, receipts, UI JSON, or git diff | local | Synthetic sentinel negative tests, browser readback, bounded credential-pattern scan | passed | No real credentials used; not a claim of exhaustive scanner coverage |
+| Invalid permissions, symlink secrets, unsafe URLs, unsafe headers, and CR/LF are rejected | local | Security negative suite | passed | Remote HTTP rejected; loopback HTTP allowed |
+| Local panel is loopback-only and mutation endpoints require session/CSRF token | local | HTTP integration tests and real browser workflow | passed | Secret never read back; 390px and dark mode checked |
+| Unknown Grok Bot bundle hash blocks activation before mutation | dry-run | Patcher/transaction fixture | passed | Pinned real bundle compile only, no installed app mutation |
+| Existing BeefAPI production route can be represented as ordinary `openai-chat` profile | fixture | Generic schema implemented; production migration not executed | not_run | No BeefAPI-specific type in core contracts |
 | Real `official -> custom -> official` switch has matching PID/hash/route/quota receipts | prod | Separate approved live smoke | blocked | Requires explicit production and metered-call approval |
 
 ## 12. Developer Handoff
