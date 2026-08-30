@@ -26,7 +26,7 @@ class FakeHost:
     def __init__(self, entry, command):
         self.host_entry, self.command = entry, command
         self.pid, self.started, self.busy, self.healthy = 111, 100, False, True
-        self.last, self.acked = None, set()
+        self.last, self.acked = None, {}
         self.issued = []
         self.after_issue_error = False
 
@@ -48,7 +48,7 @@ class FakeHost:
 
     def consume(self):
         self.last = json.loads(self.command.read_text())
-        self.acked.add(self.last["id"])
+        self.acked[self.last["id"]] = int(na.time.time() * 1000)
         self.command.unlink()
         self.pid += 1
         self.started += 100
@@ -58,7 +58,7 @@ class FakeHost:
         ok = (not self.command.exists() and id in self.acked and self.last == {"id": id, "kind": "restart"}
               and self.pid != previous["pid"] and self.started > previous["startedAt"] and self.healthy
               and observed["hostBundleSha256"] == previous["hostBundleSha256"])
-        return {"verified": ok, "observation": observed}
+        return {"verified": ok, "acknowledgedAtMs": self.acked.get(id), "observation": observed}
 
 
 class FakeHops:
@@ -414,6 +414,56 @@ class NativeActivationTests(unittest.TestCase):
         self.clock.return_value += 1_000_000
         before = self.tree()
         self.assertEqual(self.engine.progress()["status"], "pending")
+        self.assertEqual(self.tree(), before)
+
+    def test_long_busy_defer_uses_fresh_native_ack_for_health_grace(self):
+        self.engine.begin(profile(), secret=self.secret)
+        self.clock.return_value = 5000
+        self.host.busy = True
+        before = self.tree()
+        self.assertEqual(self.engine.progress()["status"], "pending")
+        self.assertEqual(self.tree(), before)
+        self.host.busy = False
+        self.host.consume()
+        self.host.healthy = False
+        before = self.tree()
+        for now in (5000, 5030, 5060):
+            self.clock.return_value = now
+            result = self.engine.progress()
+            self.assertEqual(result["status"], "pending")
+            self.assertEqual(result["phase"], "awaiting-health")
+            self.assertEqual(self.tree(), before)
+        self.clock.return_value = 5061
+        self.assertEqual(self.engine.progress()["status"], "needs-attention")
+        self.assertEqual(self.tree(), before)
+
+    def test_ack_grace_rejects_stale_invalid_future_or_foreign_ack(self):
+        self.engine.begin(profile(), secret=self.secret)
+        self.clock.return_value = 5000
+        self.host.consume()
+        self.host.healthy = False
+        request_id = self.host.last["id"]
+        for ack in (None, True, "5000000", float("nan"), float("inf"), 999999, 5_005_001):
+            with self.subTest(ack=ack):
+                self.host.acked[request_id] = ack
+                self.assertEqual(self.engine.progress()["status"], "needs-attention")
+        self.host.acked[request_id] = 5_001_000  # limited clock skew is tolerated
+        self.assertEqual(self.engine.progress()["status"], "pending")
+        self.host.last = {"id": "foreign", "kind": "restart"}
+        self.assertEqual(self.engine.progress()["status"], "needs-attention")
+        self.host.last = {"id": request_id, "kind": "upgrade"}
+        self.assertEqual(self.engine.progress()["status"], "needs-attention")
+
+    def test_fresh_ack_does_not_grant_grace_to_file_drift(self):
+        self.engine.begin(profile(), secret=self.secret)
+        self.clock.return_value = 5000
+        self.host.consume()
+        self.host.healthy = False
+        self.engine.config.write_bytes(b"FOREIGN_CONFIG")
+        before = self.tree()
+        result = self.engine.progress()
+        self.assertEqual(result["status"], "needs-attention")
+        self.assertEqual(result["error"], "activation-readback-mismatch")
         self.assertEqual(self.tree(), before)
 
     def test_restart_timestamp_is_persisted_before_publication(self):

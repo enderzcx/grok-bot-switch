@@ -216,14 +216,16 @@ class NativeHost:
         request_id = _request_id(request_id)
         current = self.read_observation()
         pending = current["pendingCommand"] is not None or _exists(self.command_path)
-        acked = False
+        acknowledged_at = None
         try:
-            acked = _positive(float(_read(self._ack_path(request_id), 128).decode().strip()))
+            timestamp = float(_read(self._ack_path(request_id), 128).decode().strip())
+            if _positive(timestamp):
+                acknowledged_at = int(timestamp) if timestamp.is_integer() else timestamp
         except Exception:
             pass
         old_pid = previous.get("pid") if isinstance(previous, dict) else None
         old_started = previous.get("startedAt") if isinstance(previous, dict) else None
-        verified = (not pending and acked and type(old_pid) is int and old_pid > 0 and _positive(old_started)
+        verified = (not pending and acknowledged_at is not None and type(old_pid) is int and old_pid > 0 and _positive(old_started)
                     and current["supervisorLastCommand"] == {"id": request_id, "kind": "restart"}
                     and current["pid"] is not None and current["pid"] != old_pid
                     and _positive(current["startedAt"]) and current["startedAt"] > old_started
@@ -231,4 +233,4 @@ class NativeHost:
                     and current["hostBundleSha256"] == previous.get("hostBundleSha256")
                     and current["health"] is True)
         return {"id": request_id, "kind": "restart", "status": "pending" if pending else "consumed" if verified else "unverified",
-                "verified": verified, "observation": current}
+                "verified": verified, "acknowledgedAtMs": acknowledged_at, "observation": current}

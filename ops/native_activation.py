@@ -29,6 +29,7 @@ KNOWN_STOCK_SHA256 = frozenset({
 })
 HANDLE_KEYS = ("pid", "port", "generation", "profileDigest", "configPath", "configDigest", "startedTicks")
 RESTART_GRACE_MS = 60_000
+ACK_CLOCK_TOLERANCE_MS = 5_000
 
 
 class ActivationError(RuntimeError):
@@ -391,10 +392,18 @@ class NativeActivation:
         self._save(self.job_path, job)
         return self._public(job)
 
-    def _await_health(self, job, error):
+    def _await_health(self, job, error, receipt):
         issued = job.get("restartIssuedAtMs")
-        if type(issued) is int and issued > 0 and 0 <= int(time.time() * 1000) - issued <= RESTART_GRACE_MS:
-            return self._public(job, status="pending", phase="awaiting-health", error=None, verified=False)
+        now = int(time.time() * 1000)
+        if type(issued) is int and issued > 0:
+            start = issued
+            acknowledged = receipt.get("acknowledgedAtMs")
+            last_command = (receipt.get("observation") or {}).get("supervisorLastCommand")
+            if (type(acknowledged) in (int, float) and issued <= acknowledged <= now + ACK_CLOCK_TOLERANCE_MS
+                    and last_command == {"id": job["id"], "kind": "restart"}):
+                start = min(acknowledged, now)
+            if 0 <= now - start <= RESTART_GRACE_MS:
+                return self._public(job, status="pending", phase="awaiting-health", error=None, verified=False)
         return self._public(job, status="needs-attention", error=error, verified=False)
 
     def _active_progress(self, job, current):
@@ -440,14 +449,14 @@ class NativeActivation:
                     return self._public(job, status="needs-attention", error="activation-readback-mismatch", verified=False)
                 receipt = self.host.restart_receipt(job["id"], job["restartPrevious"])
                 if receipt.get("verified") is not True:
-                    return self._await_health(job, "restart-not-verified")
+                    return self._await_health(job, "restart-not-verified", receipt)
                 observed = receipt["observation"]
                 if (observed.get("hostBundleSha256") != job["targetBundleHash"]
                         or _digest(self.host.host_entry) != job["targetBundleHash"]
                         or _digest(self.config) != job["targetConfigHash"]):
                     return self._public(job, status="needs-attention", error="activation-readback-mismatch", verified=False)
                 if not self._hop_ok(job):
-                    return self._await_health(job, "activation-readback-mismatch")
+                    return self._await_health(job, "activation-readback-mismatch", receipt)
                 active = {key: job[key] for key in ("id", "target", "mode", "generation", "profileDigest")}
                 active.update(hostBundleSha256=job["targetBundleHash"], configDigest=job["targetConfigHash"],
                               pid=observed["pid"], startedAt=observed["startedAt"], hop=job["newHop"], verified=True)

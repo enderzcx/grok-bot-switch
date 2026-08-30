@@ -242,6 +242,21 @@ class NativeControllerTests(unittest.TestCase):
         self.host.write_bytes(b"competing bundle mutation")
         self.assertFalse(self.native.restart_receipt(self.request_id, old)["verified"])
 
+    def test_receipt_exposes_only_validated_ack_timestamp_even_before_health(self):
+        old = self.native.read_observation()
+        self.assertIsNone(self.native.restart_receipt(self.request_id, old)["acknowledgedAtMs"])
+        self.native.issue_restart(self.request_id, old)
+        self.finish()
+        self.opener.response = Response({}, status=503)
+        receipt = self.native.restart_receipt(self.request_id, old)
+        self.assertEqual(receipt["acknowledgedAtMs"], 123456789)
+        self.assertFalse(receipt["verified"])
+        ack = self.supervisor / "acks" / self.request_id
+        for value in ("", "NaN", "Infinity", "0", "-1", "PRIVATE_SECRET"):
+            ack.write_text(value)
+            result = self.native.restart_receipt(self.request_id, old)
+            self.assertIsNone(result["acknowledgedAtMs"])
+            self.assertNotIn("PRIVATE_SECRET", json.dumps(result))
     def test_failed_publish_reports_fixed_error_and_removes_only_own_temp(self):
         old = self.native.read_observation()
         unrelated = self.supervisor / "unrelated"
