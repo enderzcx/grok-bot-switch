@@ -195,6 +195,7 @@ class GrokctlService:
             profile = self.registry.get(profile_id)
             if profile.id == OFFICIAL_ID or profile.mode == "official":
                 raise SecretError("官方通道不使用密钥")
+            self._assert_secret_not_in_use(profile.id)
             status = self.secrets.set_from_stream(profile.id, stream)
             self._append_activity(
                 "secret.set",
@@ -213,9 +214,15 @@ class GrokctlService:
     def remove_secret(self, profile_id: str) -> dict[str, object]:
         with self._lock.holding():
             profile = self.registry.get(profile_id)
+            self._assert_secret_not_in_use(profile.id)
             self.secrets.remove(profile.id)
             self._append_activity("secret.removed", profile_id=profile.id)
             return {"ok": True, "id": profile.id, "removed": True}
+
+    def _assert_secret_not_in_use(self, profile_id: str) -> None:
+        _config, runtime = self._host()
+        if profile_id in referenced_profile_ids(runtime):
+            raise ConflictError("该通道正在使用或用于恢复，不能修改密钥；请创建新通道后切换")
 
     def test_profile(self, profile_id: str, *, live: bool = False) -> dict[str, object]:
         if live:

@@ -106,6 +106,20 @@ class ServiceIntegrationTests(unittest.TestCase):
         with self.assertRaises(NotWiredError):
             self.service.test_profile("official", live=True)
 
+    def test_active_and_recovery_keys_cannot_be_removed_or_rotated(self) -> None:
+        self._configure()
+        self._add_and_key("profile-custom-openai.json", SECRET_A)
+        before = self.service.show_provider("custom-openai")["secret"]
+        self.service.use("custom-openai", apply=True)
+        for target in ("custom-openai", "official"):
+            if target == "official":
+                self.service.use("official", apply=True)
+            with self.assertRaises(ConflictError):
+                self.service.remove_secret("custom-openai")
+            with self.assertRaises(ConflictError):
+                self.service.set_secret("custom-openai", io.BytesIO(b"replacement-test-only-key"))
+            self.assertEqual(self.service.show_provider("custom-openai")["secret"], before)
+
     def test_configure_rejects_home_inference_and_unknown_hash(self) -> None:
         bad = self._host_file()
         bad["hostRoot"] = "~/not-a-host"
