@@ -130,6 +130,35 @@ class SwitchTransactionTests(unittest.TestCase):
         self.assertEqual(file_tree(self.root), before)
         self.assertEqual(self._active_bundle(), self.stock_digest)
 
+    def test_external_switch_retires_old_hop_and_official_leaves_none(self) -> None:
+        self.engine.execute("custom-openai", apply=True)
+        first_pid = self.runtime.read_hop_pid()
+        self.engine.execute("other-profile", apply=True)
+        self.assertEqual(len(self.runtime.processes.running_hops), 1)
+        self.assertNotIn(first_pid, self.runtime.processes.running_hops)
+        self.engine.execute("official", apply=True)
+        self.assertEqual(self.runtime.processes.running_hops, {})
+        self.assertIsNone(self.runtime.read_hop_pid())
+
+    def test_hop_health_failure_cleans_candidate_and_restores_old_listener(self) -> None:
+        self.engine.execute("custom-openai", apply=True)
+        first_pid = self.runtime.read_hop_pid()
+        self.runtime.processes.fail_hop_health = True
+        with self.assertRaises(SwitchError):
+            self.engine.execute("other-profile", apply=True)
+        self.assertEqual(list(self.runtime.processes.running_hops), [first_pid])
+        self.assertEqual(self.runtime.read_hop_pid(), first_pid)
+        self.assertEqual(self.runtime.observe().profile_id, "custom-openai")
+
+    def test_post_restart_failure_cleans_candidate_hop(self) -> None:
+        self.engine.execute("custom-openai", apply=True)
+        first_pid = self.runtime.read_hop_pid()
+        self.runtime.receipts_enabled = False
+        with self.assertRaises(SwitchError):
+            self.engine.execute("other-profile", apply=True)
+        self.assertEqual(list(self.runtime.processes.running_hops), [first_pid])
+        self.assertEqual(self.runtime.read_hop_pid(), first_pid)
+
     def test_official_external_official_round_trip(self) -> None:
         plan = self.engine.plan("custom-openai")
         receipt = self.engine.apply(plan, apply=True)

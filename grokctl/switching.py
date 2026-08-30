@@ -511,7 +511,7 @@ class SwitchEngine:
             if not restart_issued:
                 self._cleanup_pre_restart(plan, snapshot_written, hop_started_pid, wrapped)
                 raise wrapped
-            self._rollback_once(plan, wrapped)
+            self._rollback_once(plan, wrapped, hop_started_pid)
             raise wrapped
 
     def execute(self, target: str, apply: bool = False):
@@ -614,12 +614,22 @@ class SwitchEngine:
 
     def _start_and_health_hop(self, plan: ActivationPlan) -> int:
         config = _mapping(plan.hop_config)
+        pid = None
         try:
+            # Snapshot already exists and the host is idle. Release the old
+            # listener before reusing its port; failure restores that snapshot.
+            if self.host.read_hop_pid() is not None:
+                self.host.stop_hop_if_owner(self.host.layout.hop_cmdline_token)
             pid = self.host.start_hop(config)
             health = self.host.hop_health(pid, config)
-        except HostError as exc:
-            raise SwitchError(str(exc), exc.code or "hop_start_failed", exc.evidence) from exc
-        self._assert_health_consistent(plan, health)
+            self._assert_health_consistent(plan, health)
+        except Exception as exc:
+            if pid is not None:
+                try:
+                    self.host.stop_pid(pid, self.host.layout.hop_cmdline_token)
+                except Exception as stop_error:
+                    raise SwitchError("failed hop could not be stopped", "rollback_failed", {"hopPidLingering": pid}) from stop_error
+            raise _wrap(exc)
         return pid
 
     def _assert_health_consistent(self, plan: ActivationPlan, health: Mapping[str, object]) -> None:
@@ -750,7 +760,7 @@ class SwitchEngine:
             )
         cause.evidence.update(evidence)
 
-    def _rollback_once(self, plan: ActivationPlan, cause: SwitchError) -> None:
+    def _rollback_once(self, plan: ActivationPlan, cause: SwitchError, hop_started_pid: Optional[int] = None) -> None:
         evidence = {
             "transactionId": plan.transaction_id,
             "previousProfile": plan.previous_profile,
@@ -759,6 +769,8 @@ class SwitchEngine:
             "cause": cause.code,
         }
         try:
+            if hop_started_pid is not None:
+                self.host.stop_pid(hop_started_pid, self.host.layout.hop_cmdline_token)
             self.host.restore_snapshot(Path(plan.staged_paths.snapshot))
             self.host.clear_own_command(plan.supervisor_command_id)
             rollback_id = self.host.ids.new()

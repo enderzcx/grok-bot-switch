@@ -347,6 +347,9 @@ class SyntheticProcessGateway:
     def start_hop(self, config: Mapping[str, object], pid_path: Path, token: str) -> int:
         if self.fail_hop_start:
             raise HostError("hop start failed", "hop_start_failed")
+        for running in self.running_hops.values():
+            if (running.get("listenHost"), running.get("listenPort")) == (config.get("listenHost"), config.get("listenPort")):
+                raise HostError("hop listen address is already occupied", "hop_start_failed")
         pid = self.next_pid
         self.next_pid += 1
         self.cmdlines[pid] = token
