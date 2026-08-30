@@ -7,12 +7,14 @@ import http.client
 import os
 import re
 import stat
+import time
 import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
 
 from grokctl.platform_security import open_nofollow, private_permissions, reject_links
+from grokctl.client_process import ReceiverError, verified_receiver
 
 MARKER = "grok-bot-switch-client-bridge-v1"
 MAX_MANIFEST_BYTES = 8 * 1024
@@ -21,6 +23,9 @@ TIMEOUT_SECONDS = 15
 OPERATION_TIMEOUT_SECONDS = 35
 _VERSION = re.compile(r"[0-9]{1,4}(?:\.[0-9]{1,6}){1,3}(?:[-+][A-Za-z0-9.-]{1,40})?")
 _EXECUTOR_REASONS = {"not-provided", "unsupported-address", "ping-rejected", "ping-failed", "host-not-ready"}
+_NATIVE_ERRORS = {"host-not-healthy-idle", "supervisor-command-pending", "activation-in-progress",
+                  "active-state-drift", "unknown-host-bundle", "supervisor-source-mismatch",
+                  "unmanaged-patched-host", "unmanaged-host-config"}
 
 
 class _Invalid(ValueError):
@@ -239,7 +244,11 @@ def status(home: Path, installed_executable: Path | str | None = None) -> dict[s
 
 
 def call(home: Path, action: str, *, profile=None, secret=None, installed_executable=None) -> dict:
-    """User-requested, fixed native operation; never forwards arbitrary commands."""
+    """One operation, with receiver proof and a shared 35-second network budget.
+
+    The private instance is authenticated before any POST, and process/listener
+    ownership is rechecked immediately before dispatch. begin is never retried.
+    """
     if action not in ("bootstrap", "inspect", "setup", "plan", "begin", "progress"):
         raise ClientBridgeError("unsupported-operation")
     try:
@@ -264,21 +273,46 @@ def call(home: Path, action: str, *, profile=None, secret=None, installed_execut
     request = urllib.request.Request(f"http://127.0.0.1:{manifest['port']}/v1/{route}", data=body,
         headers={"Authorization": "Bearer " + manifest["token"], "Content-Type": "application/json"}, method="POST")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    deadline = time.monotonic() + OPERATION_TIMEOUT_SECONDS
+    posted = False
+    def remaining():
+        timeout = deadline - time.monotonic()
+        if timeout <= 0:
+            raise TimeoutError()
+        return timeout
     try:
-        with opener.open(request, timeout=OPERATION_TIMEOUT_SECONDS) as response:
-            if response.status != 200 or response.geturl() != request.full_url:
+        with verified_receiver(manifest["pid"], manifest["executable"], manifest["port"]) as receiver:
+            check = urllib.request.Request(f"http://127.0.0.1:{manifest['port']}/v1/status",
+                headers={"Authorization": "Bearer " + manifest["token"], "Accept": "application/json"}, method="GET")
+            with opener.open(check, timeout=remaining()) as response:
+                if response.status != 200 or response.geturl() != check.full_url:
+                    raise _Invalid()
+                check_raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(check_raw) > MAX_RESPONSE_BYTES:
+                    raise _Invalid()
+            state = _sanitize(_object(check_raw), manifest)
+            if state["clientConnected"] is not True or state["mode"] != "native-switch":
                 raise _Invalid()
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
-            if len(raw) > MAX_RESPONSE_BYTES or manifest["token"].encode() in raw:
+            if _manifest(Path(home), installed_executable) != manifest:
                 raise _Invalid()
-            if secret and len(secret) >= 8 and secret.encode() in raw:
-                raise _Invalid()
+            timeout = remaining()
+            receiver.recheck()
+            posted = True
+            with opener.open(request, timeout=timeout) as response:
+                if response.status != 200 or response.geturl() != request.full_url:
+                    raise _Invalid()
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES or manifest["token"].encode() in raw:
+                    raise _Invalid()
+                if secret and len(secret) >= 8 and secret.encode() in raw:
+                    raise _Invalid()
         data = _object(raw)
         result = _runtime(data) if action == "inspect" else _action_result(data)
         if result is None:
             raise _Invalid()
         if data.get("ok") is False:
-            raise ClientBridgeError("native-operation-failed")
+            code = data.get("error")
+            raise ClientBridgeError(code if isinstance(code, str) and code in _NATIVE_ERRORS else "native-operation-failed")
         if action == "bootstrap" and not (result.get("ok") is True and result.get("packageSha256")):
             raise _Invalid()
         if action == "setup" and not (result.get("ok") is True and result.get("stockSha256") and result.get("patchedSha256")):
@@ -290,9 +324,11 @@ def call(home: Path, action: str, *, profile=None, secret=None, installed_execut
         return result
     except ClientBridgeError:
         raise
+    except ReceiverError:
+        raise ClientBridgeError("receiver-unverified") from None
     except urllib.error.HTTPError as error:
         error.close()
-        raise ClientBridgeError("probe-busy" if error.code == 409 else "native-operation-unconfirmed") from None
+        raise ClientBridgeError("probe-busy" if error.code == 409 else ("native-operation-unconfirmed" if posted else "receiver-unverified")) from None
     except Exception:
         # No automatic retry of begin: the remote journal may already exist.
-        raise ClientBridgeError("native-operation-unconfirmed") from None
+        raise ClientBridgeError("native-operation-unconfirmed" if posted else "receiver-unverified") from None

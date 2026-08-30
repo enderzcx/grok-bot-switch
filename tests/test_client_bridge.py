@@ -6,9 +6,11 @@ import tempfile
 import threading
 import unittest
 import uuid
+from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from grokctl.client_process import ReceiverError
 
 from grokctl.client_bridge import MARKER, MAX_MANIFEST_BYTES, MAX_RESPONSE_BYTES, status, call, ClientBridgeError
 from grokctl.profiles import atomic_replace, ensure_private_dir
@@ -26,6 +28,11 @@ class ClientBridgeTests(unittest.TestCase):
         self.posts = []
         self.http_status = 200
         self.location = None
+        self.post_body = None
+        self.receiver = Mock()
+        self.receiver_patch = patch("grokctl.client_bridge.verified_receiver", return_value=nullcontext(self.receiver))
+        self.verify_receiver = self.receiver_patch.start()
+        self.addCleanup(self.receiver_patch.stop)
         self.body = {
             "service": MARKER, "schemaVersion": 1, "instance": self.instance,
             "clientVersion": "0.56.1", "clientConnected": True, "hostReachable": True,
@@ -43,7 +50,8 @@ class ClientBridgeTests(unittest.TestCase):
 
             def do_GET(self):
                 owner.requests.append((self.path, dict(self.headers)))
-                payload = owner.body if isinstance(owner.body, bytes) else json.dumps(owner.body).encode()
+                body = owner.post_body if self.command == "POST" and owner.post_body is not None else owner.body
+                payload = body if isinstance(body, bytes) else json.dumps(body).encode()
                 self.send_response(owner.http_status)
                 if owner.location:
                     self.send_header("Location", owner.location)
@@ -118,23 +126,70 @@ class ClientBridgeTests(unittest.TestCase):
     def test_native_begin_uses_one_post_and_returns_no_key(self):
         self.manifest["mode"] = "native-switch"
         self.save_manifest()
-        self.body = {"id":"gbs-"+str(uuid.uuid4()),"status":"pending","verified":False,"target":"custom"}
+        self.body["mode"] = "native-switch"
+        self.post_body = {"id":"gbs-"+str(uuid.uuid4()),"status":"pending","verified":False,"target":"custom"}
         key = "SENTINEL_SUPPLIER_KEY"
         result = call(self.home, "begin", profile={"id":"custom"}, secret=key)
         self.assertEqual(len(self.posts), 1)
         self.assertEqual(self.posts[0]["secret"], key)
         self.assertFalse(result["verified"])
         self.assertNotIn(key, json.dumps(result))
+        self.verify_receiver.assert_called_once_with(self.manifest["pid"], self.executable, self.server.server_port)
+        self.receiver.recheck.assert_called_once()
+        self.assertEqual([path for path, _ in self.requests], ["/v1/status", "/v1/operation"])
 
     def test_false_verified_or_key_echo_is_rejected_without_retry(self):
         self.manifest["mode"] = "native-switch"
         self.save_manifest()
+        self.body["mode"] = "native-switch"
         for body in ({"status":"verified","verified":False}, {"status":"pending","verified":False,"extra":"SENTINEL_SUPPLIER_KEY"}):
             before = len(self.posts)
-            self.body = body
+            self.post_body = body
             with self.assertRaises(ClientBridgeError):
                 call(self.home, "begin", profile={"id":"custom"}, secret="SENTINEL_SUPPLIER_KEY")
             self.assertEqual(len(self.posts), before + 1)
+
+    def test_dead_pid_or_wrong_listener_owner_never_receives_secret(self):
+        self.manifest["mode"] = "native-switch"
+        self.save_manifest()
+        self.verify_receiver.side_effect = ReceiverError()
+        with self.assertRaises(ClientBridgeError) as error:
+            call(self.home, "begin", secret="SENTINEL_KEY")
+        self.assertEqual(error.exception.code, "receiver-unverified")
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.posts, [])
+
+    def test_wrong_instance_or_invalid_status_never_receives_secret(self):
+        self.manifest["mode"] = "native-switch"
+        self.save_manifest()
+        self.body["mode"] = "native-switch"
+        original = dict(self.body)
+        for body in ({**original, "instance": str(uuid.uuid4())}, {}, {**original, "service": "foreign"}):
+            self.body = body
+            with self.assertRaises(ClientBridgeError) as error:
+                call(self.home, "begin", secret="SENTINEL_KEY")
+            self.assertEqual(error.exception.code, "receiver-unverified")
+        self.assertEqual(self.posts, [])
+
+    def test_receiver_replaced_after_status_never_receives_secret(self):
+        self.manifest["mode"] = "native-switch"
+        self.save_manifest()
+        self.body["mode"] = "native-switch"
+        self.receiver.recheck.side_effect = ReceiverError()
+        with self.assertRaises(ClientBridgeError):
+            call(self.home, "begin", secret="SENTINEL_KEY")
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.posts, [])
+
+    def test_only_fixed_native_error_codes_are_returned(self):
+        self.manifest["mode"] = "native-switch"
+        self.save_manifest()
+        self.body["mode"] = "native-switch"
+        for code in ("activation-in-progress", "host-not-healthy-idle", "SENSITIVE_EXCEPTION_TEXT"):
+            self.post_body = {"ok": False, "error": code}
+            with self.assertRaises(ClientBridgeError) as error:
+                call(self.home, "plan", profile={"id": "custom"})
+            self.assertEqual(error.exception.code, code if code != "SENSITIVE_EXCEPTION_TEXT" else "native-operation-failed")
 
     def test_managed_runtime_requires_matching_mode_and_sanitizes_nested_state(self):
         self.manifest["mode"] = "native-switch"
