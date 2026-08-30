@@ -12,6 +12,8 @@
 
 ## 使用与源码开发
 
+最新修复预览版：`v0.3.0-beta.2`。修复面板停止误报、启动完整性校验和忙碌状态误报，见 [s-r 审阅记录](docs/sr-0.3.0-beta.2.md)。
+
 普通用户使用[安装提示词](docs/install-with-grok.md)，第一次由 Grok Bot 执行安装可能消耗官方额度。密钥只在云端面板密码框中填写，不要粘贴到聊天。
 
 [旧 Windows 预览版 v0.2.0-beta.1](https://github.com/enderzcx/grok-bot-switch/releases/tag/v0.2.0-beta.1)属于历史客户端适配方案，不是本版独立模式安装入口。以下 CLI 命令供开发和本地配置检查，不能在用户电脑上直接控制独立云端。

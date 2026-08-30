@@ -1,6 +1,8 @@
 import hashlib
 import io
 import json
+import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -14,6 +16,8 @@ from grokctl.independent_service import IndependentService
 from grokctl.models import GrokctlError
 from grokctl.ui import ProviderPanel
 from ops.independent import install, InstallError, private_dir
+from ops import independent
+from grokctl.profiles import atomic_replace
 from ops.native_controller import NativeControllerError
 
 REPO = Path(__file__).resolve().parents[1]
@@ -141,6 +145,97 @@ class IndependentTests(unittest.TestCase):
         link.symlink_to(self.root, target_is_directory=True)
         with self.assertRaises(InstallError):
             private_dir(link / "child")
+
+    def test_start_revalidates_sources_before_spawning(self):
+        bundle = build(REPO, self.root / "dist")
+        root = private_dir(self.root / "install")
+        target = install(Path(bundle["archive"]), bundle["sha256"], root)
+        (target / "ops/independent.py").write_text("changed")
+        with patch.object(independent.subprocess, "Popen") as spawn:
+            with self.assertRaisesRegex(InstallError, "installed-source-changed"):
+                independent.start(root, target, 0)
+        spawn.assert_not_called()
+
+    def test_start_rejects_changed_archive_and_unhealthy_existing_process(self):
+        bundle = build(REPO, self.root / "dist")
+        root = private_dir(self.root / "install")
+        target = install(Path(bundle["archive"]), bundle["sha256"], root)
+        with patch.object(independent, "panel_process", return_value={"package": str(target)}), \
+             patch.object(independent, "running", return_value=None), \
+             patch.object(independent.subprocess, "Popen") as spawn:
+            with self.assertRaisesRegex(InstallError, "panel-unhealthy"):
+                independent.start(root, target, 0)
+        spawn.assert_not_called()
+        (root / "archives" / (target.name + ".zip")).write_bytes(b"corrupt")
+        with self.assertRaisesRegex(InstallError, "checksum-mismatch"):
+            independent.start(root, target, 0)
+
+    def test_stop_uses_process_exit_not_http_failure(self):
+        with patch.object(independent, "panel_process", side_effect=[{"pid": 123}, None]), \
+             patch.object(independent, "running", side_effect=AssertionError("HTTP is not process evidence")), \
+             patch.object(independent.os, "kill") as kill:
+            self.assertEqual(independent.stop(self.root), {"running": False})
+        kill.assert_called_once_with(123, signal.SIGTERM)
+        with patch.object(independent, "panel_process", side_effect=InstallError("panel-process-mismatch")), \
+             patch.object(independent.os, "kill") as kill:
+            with self.assertRaises(InstallError):
+                independent.stop(self.root)
+        kill.assert_not_called()
+
+    def test_process_identity_fences_pid_reuse_and_unrelated_commands(self):
+        root = private_dir(self.root / "managed")
+        private_dir(root / "state")
+        proc = self.root / "proc" / "123"
+        proc.mkdir(parents=True)
+        package = root / "versions" / ("a" * 64)
+        state = {"pid": 123, "package": str(package), "port": 18994, "startedTicks": 42}
+        atomic_replace(root / "state/panel.json", json.dumps(state).encode())
+        (proc / "stat").write_text("123 (python test) S " + "0 " * 18 + "42 0")
+        argv = [sys.executable, "-I", str(package / "ops/independent.py"), "serve", "--root", str(root), "--port", "0"]
+        (proc / "cmdline").write_bytes(b"\0".join(s.encode() for s in argv) + b"\0")
+        self.assertEqual(independent.panel_process(root, proc_root=proc.parent), state)
+        state["startedTicks"] = 41
+        atomic_replace(root / "state/panel.json", json.dumps(state).encode())
+        with self.assertRaisesRegex(InstallError, "panel-process-mismatch"):
+            independent.panel_process(root, proc_root=proc.parent)
+        del state["startedTicks"]  # beta.1 migration remains supported.
+        atomic_replace(root / "state/panel.json", json.dumps(state).encode())
+        self.assertEqual(independent.panel_process(root, proc_root=proc.parent), state)
+        (proc / "cmdline").write_bytes(b"unrelated\0")
+        with self.assertRaisesRegex(InstallError, "panel-process-mismatch"):
+            independent.panel_process(root, proc_root=proc.parent)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux process lifecycle")
+    def test_linux_unresponsive_process_is_not_reported_stopped(self):
+        bundle = build(REPO, self.root / "dist")
+        root = self.root / "lifecycle"
+        def cli(action, *extra):
+            result = subprocess.run([sys.executable, "-I", bundle["archive"], action,
+                                     "--root", str(root), "--port", "0", *extra],
+                                    capture_output=True, text=True, timeout=15)
+            return result.returncode, json.loads(result.stdout)
+        code, state = cli("install", "--sha256", bundle["sha256"])
+        self.assertEqual(code, 0, state)
+        pid = state["pid"]
+        try:
+            os.kill(pid, signal.SIGSTOP)
+            code, status = cli("status")
+            self.assertEqual(code, 0)
+            self.assertTrue(status["running"])
+            self.assertFalse(status["healthy"])
+            code, failure = cli("start")
+            self.assertEqual(code, 1)
+            self.assertEqual(failure["error"], "panel-unhealthy-stop-before-start")
+            code, failure = cli("stop")
+            self.assertEqual(code, 1)
+            self.assertEqual(failure["error"], "panel-stop-unconfirmed")
+        finally:
+            os.kill(pid, signal.SIGCONT)
+            code, stopped = cli("stop")
+            self.assertEqual(code, 0, stopped)
+        code, state = cli("start")
+        self.assertEqual(code, 0, state)
+        self.assertEqual(cli("stop"), (0, {"ok": True, "mode": "independent", "hostModified": False, "running": False}))
 
 
 if __name__ == "__main__":

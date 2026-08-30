@@ -20,7 +20,7 @@ PANEL_FILES = (
 )
 
 
-def installation_prompt(digest, release="v0.3.0-beta.1"):
+def installation_prompt(digest, release="v0.3.0-beta.2"):
     return f'''# 给 Grok Bot 的安装提示词
 
 只需将分隔线下方的提示词复制给 Grok Bot，不需要上传附件或在本机安装软件。
