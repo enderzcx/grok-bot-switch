@@ -23,6 +23,8 @@ from ops.native_hop import owns_listener
 
 
 SUPERVISOR_SHA256 = "db270383ac06d217c78e6079508b39939b8a9f77dfe3213308e21b5c38a6c330"
+# Audited de429dc host: restart/idle/ack logic is identical; boot-fetch differs.
+SUPERVISOR_DE429DC_SHA256 = "54d78fee7222970e3aaf8baee548b87a5c3dded3502f6d39488768cb8a269233"
 MAX_READ = 64 * 1024
 MAX_SOURCE = 128 * 1024 * 1024
 
@@ -181,7 +183,8 @@ class NativeHost:
 
     def _assert_supervisor(self):
         try:
-            matched = hashlib.sha256(_read(self.supervisor_source, MAX_SOURCE)).hexdigest() == SUPERVISOR_SHA256
+            matched = hashlib.sha256(_read(self.supervisor_source, MAX_SOURCE)).hexdigest() in (
+                SUPERVISOR_SHA256, SUPERVISOR_DE429DC_SHA256)
         except Exception:
             matched = False
         if not matched:

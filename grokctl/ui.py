@@ -371,6 +371,9 @@ class PanelHandler(BaseHTTPRequestHandler):
         return parse_json_body(raw)
 
     def _handle_get(self, path: str, query: Mapping[str, list[str]]) -> object:
+        if path == "/api/health" and getattr(self.panel.service, "panel_instance_id", None):
+            return {"ok": True, "instanceId": self.panel.service.panel_instance_id,
+                    "mode": "independent"}
         if path == "/api/status":
             return self.panel.service.status()
         if path == "/api/providers":

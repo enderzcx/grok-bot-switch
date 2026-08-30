@@ -1,18 +1,20 @@
 # Grok Bot Switch
 
-仓库：[`enderzcx/grok-bot-switch`](https://github.com/enderzcx/grok-bot-switch) · CLI：`grokctl` · 状态：Windows 公开预览版
+仓库：[`enderzcx/grok-bot-switch`](https://github.com/enderzcx/grok-bot-switch) · 独立模式预览版
 
 一个不绑定供应商的 Grok Bot 通道管理工具：保存兼容服务的 URL、模型和 API key，明确选择协议，在官方通道与外部通道之间切换。非 xAI / X 官方项目。
 
-产品入口是自动识别本机已安装的 Grok Bot，不要求用户配置 SSH 或 Tailscale。Windows 0.28.0 的可恢复客户端适配、原生连接和切换控制器已通过实机验收；已检查的接口和接入边界见 [本机客户端接入](docs/local-client-integration.md)。
+用户只需把[安装提示词](docs/install-with-grok.md)交给 Grok Bot。它会下载固定版本、先校验再安装，在自己的云端启动管理面板。然后从原版 Grok Bot 的云端桌面进入面板，填写供应商配置并切换。
 
-**当前是公开预览版，不是稳定版。** 已在 Windows 完成官方 → 自定义 API → 官方的真实切换，并从普通 Grok Bot 聊天读回 `GROK_BOT_SWITCH_EXTERNAL_OK`，五条外部请求均与供应商生产回执匹配。此次真实协议为 OpenAI Chat；Responses、Messages 已有本地测试，但未完成相同的实机供应商验收。供应商 OAuth 尚未实现。完整证据和限制见 [原生接入验收记录](docs/native-client-rollout.md)。
+不需要用户上传安装包、安装本机 Switch、配置 SSH/Tailscale、另建服务器或使用我们的服务。本版只提供独立模式，自建/托管中继后续再做。完整条件、数据边界和恢复方式见[独立模式说明](docs/independent-mode.md)。
 
-## 使用
+**这是预览版，不是稳定版。** 面板安装成功不等于云端切换成功。仅支持经过校验的云端版本，未知版本拒绝切换；供应商 OAuth 尚未实现。旧 Windows 预览版的真实聊天和供应商回执见[历史验收记录](docs/native-client-rollout.md)，不能代替独立模式的新验收。
 
-[下载 Windows x64 预览版 v0.2.0-beta.1](https://github.com/enderzcx/grok-bot-switch/releases/tag/v0.2.0-beta.1)。下载后可用同页的 `SHA256SUMS.txt` 校验 ZIP 完整性。
+## 使用与源码开发
 
-Windows 桌面测试包已可构建：解压后双击 `GrokBotSwitch.exe`，不需要安装 Python/Node。原生窗口、真实主机切换与生产验收的完成状态分开记录，见 [Windows 桌面验收](docs/desktop-windows.md)。下方命令用于源码/CLI 使用。
+普通用户使用[安装提示词](docs/install-with-grok.md)，第一次由 Grok Bot 执行安装可能消耗官方额度。密钥只在云端面板密码框中填写，不要粘贴到聊天。
+
+[旧 Windows 预览版 v0.2.0-beta.1](https://github.com/enderzcx/grok-bot-switch/releases/tag/v0.2.0-beta.1)属于历史客户端适配方案，不是本版独立模式安装入口。以下 CLI 命令供开发和本地配置检查，不能在用户电脑上直接控制独立云端。
 
 Python 3.10+；运行协议/host 测试另需 Node.js。Python 服务不需要第三方包，React 前端及依赖已打包在仓库内。在仓库目录运行：
 
@@ -54,7 +56,7 @@ python3 -m grokctl --home runtime/operator-state status --json
 - 推理请求由 hop 添加 key；host 的推理配置不含凭据。配置和 secret 分文件、仅当前用户可读写；密钥不会回显给界面。
 - 当前通道与恢复流程引用中的密钥禁止原地轮换或删除；需要更换时新建通道再切换。切回官方不会删除已保存密钥。
 - HTTPS 外部 URL、明确的请求路径、安全请求头、DNS/IP 检查和禁止重定向共同约束上游；这不是任意 URL 代理。
-- host 补丁仅对固定的已知 bundle hash 与唯一锚点编译；未知版本拒绝。首次点击连接会备份并适配已支持的 Windows 安装；运行中的客户端不会被强制关闭。Mac 目前只检测，不修改安装。
+- host 补丁仅对固定的已知 bundle hash 与唯一锚点编译；未知版本拒绝。独立模式不修改 Windows/Mac 的原版安装，用户点击切换时才适配云端主程序；并非整个系统完全无侵入。
 - 切换影响当前云端的所有 Bot。地址和供应商密钥会提交到该云端的私有目录；原有账号凭据留在原生客户端进程内。
 - 切换结果必须经过原生重启回执、新进程身份和健康状态确认。等待中的命令不强制重启；不确定的结果停止后续切换。外部模式暂不支持原生语音转写，不回退官方语音。
 - `host configure` 当前只接受 `lab-local-root`，明确显示 `lab-synthetic`；默认禁止模拟 apply。即使测试显式开启模拟 apply，也不会重启真实 Grok Bot。

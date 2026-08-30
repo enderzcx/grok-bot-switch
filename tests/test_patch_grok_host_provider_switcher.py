@@ -453,6 +453,7 @@ class BackupAndFenceTests(unittest.TestCase):
         self.assertEqual(PATCHER.SUPPORTED_STOCK_SHA256, frozenset((
             "3c3f986e614aaf8fbec642269da40dd20f1dbd9912bdf8f2390bafd61ec684ef",
             "0035c31a74ac9d7fc9d93532cf37e217d6074143d46b1eeb3c5e79699df2f88f",
+            "12df7a63cf7d0eb153697fbfc18494cf4f44eff4f0a1d086703a8c7e8043e1d0",
         )))
 
     def test_idempotent_manifest_retains_stock_identity_and_unknown_base_rejects(self):
@@ -624,6 +625,28 @@ class CurrentHostTests(unittest.TestCase):
             with self.assertRaisesRegex(PATCHER.PatchError, "patched createSandTranscribeAudio anchor mismatch"):
                 PATCHER.patch_host_bundle(unguarded, REAL_PROTOCOLS_DIR, REAL_SESSION_PATH, root / "bad.cjs", root / "bad-backup")
             self.assertFalse((root / "bad.cjs").exists())
+
+
+DE429DC_PATH = Path("/Users/sunny/Work/CODEX/grok-bot-switch/runtime/cloud-20260831-audit/host-main.cjs")
+
+
+@unittest.skipUnless(DE429DC_PATH.is_file(), "audited de429dc source absent")
+class IndependentHostCompatibilityTests(unittest.TestCase):
+    def test_de429dc_source_hash_exact_anchors_idempotence_and_syntax(self):
+        raw = DE429DC_PATH.read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), PATCHER.HOST_DE429DC_SHA256)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output, second = root / "patched.cjs", root / "second.cjs"
+            first = PATCHER.patch_host_bundle(DE429DC_PATH, REAL_PROTOCOLS_DIR, REAL_SESSION_PATH, output, root / "backup")
+            again = PATCHER.patch_host_bundle(output, REAL_PROTOCOLS_DIR, REAL_SESSION_PATH, second, root / "backup")
+            self.assertTrue(first["changed"])
+            self.assertTrue(again["idempotent"])
+            self.assertEqual(first["recognizedStockSha256"], PATCHER.HOST_DE429DC_SHA256)
+            self.assertEqual(output.read_bytes(), second.read_bytes())
+            self.assertEqual(output.read_text().count(PATCHER.PATCHED_CREATE_SAND_TRANSCRIBE_AUDIO), 1)
+            node_check(output)
+        self.assertEqual(DE429DC_PATH.read_bytes(), raw)
 
 
 if __name__ == "__main__":

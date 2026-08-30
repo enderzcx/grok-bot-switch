@@ -16,7 +16,7 @@ sys.path.insert(0, str(PACKAGE))
 
 from grokctl.profiles import atomic_replace, ensure_private_dir, _file_is_private_regular
 from grokctl.models import ValidationError
-from ops.native_controller import NativeHost
+from ops.native_controller import NativeHost, NativeControllerError
 from ops.patch_grok_host_provider_switcher import (
     SUPPORTED_STOCK_SHA256, apply_patch,
     load_protocol_sources,
@@ -74,7 +74,7 @@ def artifacts(host: NativeHost) -> dict:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
         return {"stock_bundle": stock, "patched_bundle": target,
                 "stock_sha256": stock_sha, "patched_sha256": patched_sha}
-    raise ValueError("unknown-host-bundle")
+    raise NativeControllerError("unknown-host-bundle")
 
 
 def _private_json(path: Path) -> dict | None:
