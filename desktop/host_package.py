@@ -19,6 +19,11 @@ FILES = (
     "src/provider_protocols/index.cjs",
 )
 
+# This is a bounded host runtime, not the desktop control-plane distribution.
+# Importing the repository initializer would eagerly load the unbundled service.
+# Override only this packaged member; the repository's public API is unchanged.
+HOST_INIT = b'"""Minimal Grok Bot Switch host runtime package."""\n'
+
 
 def build_host_package(root: Path) -> dict:
     files = {}
@@ -26,7 +31,7 @@ def build_host_package(root: Path) -> dict:
         path = root / name
         if path.is_symlink() or not path.is_file():
             raise ValueError("missing package source: " + name)
-        data = path.read_bytes()
+        data = HOST_INIT if name == "grokctl/__init__.py" else path.read_bytes()
         if len(data) > 1024 * 1024:
             raise ValueError("package source too large")
         files[name] = {"sha256": hashlib.sha256(data).hexdigest(), "content": base64.b64encode(data).decode()}
