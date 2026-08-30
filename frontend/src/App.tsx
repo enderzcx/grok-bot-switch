@@ -47,6 +47,7 @@ const message = (error: unknown) =>
   error instanceof Error ? error.message : "操作失败";
 const nativeAttached = (status: Status | null) =>
   status?.runtimeKind === "native-host" &&
+  status.client?.pairingConfirmed !== false &&
   status.client?.mode === "native-switch";
 const nativeReady = (status: Status | null) =>
   !!(
@@ -372,7 +373,7 @@ export default function App() {
   async function connect() {
     if (
       busy ||
-      nativeAttached(status) ||
+      (nativeAttached(status) && status?.connectionMode !== "independent") ||
       connectInFlight.current ||
       pendingId ||
       switchInFlight.current
@@ -392,7 +393,7 @@ export default function App() {
       else if (nativeReady(current)) setNotice("已连接 Grok Bot。");
       else
         setConnectionError(
-          "连接尚未确认，请确认 Grok Bot 已打开并登录，再刷新状态。",
+          current.client?.error?.message || planBlockers({ blocking: current.blocking, target: "official" }).join("；") || "云端尚未就绪，请稍后刷新。",
         );
     } catch (err) {
       if (mounted.current) setConnectionError(message(err));
@@ -564,6 +565,7 @@ export default function App() {
     }
   }
   const isLab = status?.runtimeKind === "lab-synthetic";
+  const independent = status?.connectionMode === "independent";
   const installation = status?.installation;
   const installed = installation?.installations[0];
   const unconfirmed = !!job && job.status !== "failed";
@@ -629,6 +631,8 @@ export default function App() {
                     ? "状态读取失败"
                     : isLab
                       ? "模拟环境"
+                      : independent
+                        ? nativeReady(status) ? "独立模式 · 已就绪" : "独立模式 · 暂不可切换"
                       : connecting
                         ? "连接中"
                         : nativeAttached(status) ||
@@ -643,24 +647,16 @@ export default function App() {
                                 : "主机未接入"}
               </span>
             </p>
-            {installed && !isLab && !nativeAttached(status) && (
-              <Button
-                variant="outline"
-                className="min-h-10"
-                disabled={disabled || installation?.ambiguous}
-                onClick={() => void connect()}
-              >
-                {connecting ? "连接中" : "连接 Grok Bot"}
-              </Button>
-            )}
           </div>
           <p className="mt-2 text-xs text-muted-foreground">
             {loading
-              ? "正在检查本机 Grok Bot…"
+              ? "正在读取运行状态…"
               : error
                 ? "暂时无法读取状态，请点击刷新重试。"
                 : isLab
                   ? "当前连接的是模拟主机，不代表真实 Grok Bot 已切换。"
+                  : independent
+                    ? "面板运行在你的 Grok Bot 云端，直接连接你配置的供应商。"
                   : nativeAttached(status) ||
                       (status?.host.wired && !status.client)
                     ? "切换以确认后的状态为准。"
@@ -668,15 +664,20 @@ export default function App() {
                       ? "已找到本机 Grok Bot，尚未连接。"
                       : "请先安装 Grok Bot，安装后点击刷新。"}
           </p>
-          {installed && !isLab && !nativeAttached(status) && (
-            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-              首次连接前请先退出 Grok Bot。连接会备份安装文件，保留登录和 Bot
-              数据，完成后重新打开应用。
-            </p>
+          {independent && !nativeReady(status) && (
+            <div className="mt-3 space-y-2">
+              <p className="text-sm text-muted-foreground" role="status">
+                {status?.client?.error?.message || planBlockers({ blocking: status?.blocking, target: "official" }).join("；") || "正在检查云端兼容性。"}
+              </p>
+              <Button variant="outline" disabled={disabled} onClick={() => void connect()}>检查云端兼容性</Button>
+            </div>
+          )}
+          {!loading && status && !isLab && !independent && (
+            <p className="mt-3 text-sm text-muted-foreground">请将发布页的安装提示词交给 Grok Bot，它会自行下载并安装。然后在它的云端浏览器打开管理面板。本机窗口不能直接控制云端。</p>
           )}
           {!isLab && (installed || status?.client) && (
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-              切换会影响当前云端的所有 Bot，并将供应商地址和密钥同步到该云端。
+              切换会影响当前云端的所有 Bot。供应商密钥保存在该云端，不要粘贴到聊天中。
             </p>
           )}
           {connectionError && (

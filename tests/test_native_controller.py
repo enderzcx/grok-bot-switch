@@ -128,6 +128,13 @@ class NativeControllerTests(unittest.TestCase):
         self.assertEqual(proxy.proxies, {})
         self.assertIsNone(redirect.redirect_request(None, None, 302, "", {}, "https://example.invalid"))
 
+    def test_second_audited_supervisor_is_explicit_not_wildcard(self):
+        with patch.object(nc, "SUPERVISOR_SHA256", "0" * 64):
+            with self.assertRaises(nc.NativeControllerError):
+                self.native._assert_supervisor()
+            with patch.object(nc, "SUPERVISOR_DE429DC_SHA256", hashlib.sha256(self.source.read_bytes()).hexdigest()):
+                self.native._assert_supervisor()
+
     def test_busy_missing_nonboolean_or_unhealthy_blocks_restart(self):
         expected = self.native.read_observation()
         for body in ({"isBusy": True}, {}, {"isBusy": 0}, {"isBusy": "false"}, {"isBusy": None}, [], b"not json", b"x" * (nc.MAX_READ + 1)):

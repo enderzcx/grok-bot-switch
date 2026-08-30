@@ -500,9 +500,9 @@ const click = (name: string) =>
     fireEvent.click(screen.getByRole("button", { name }));
   });
 
-test("connects a detected probe-mode client inline with one POST and fresh ready status", async () => {
+test("checks the independent cloud inline with one POST and fresh ready status", async () => {
   let connected = false;
-  const current = nativeStatus();
+  const current = { ...nativeStatus(), connectionMode: "independent" };
   vi.mocked(fetch).mockImplementation(async (url, options) => {
     if (url === "/api/providers") return json({ providers: [profile] });
     if (url === "/api/status")
@@ -529,17 +529,15 @@ test("connects a detected probe-mode client inline with one POST and fresh ready
   });
   const user = userEvent.setup();
   render(<App />);
-  const button = await screen.findByRole("button", { name: "连接 Grok Bot" });
-  expect(screen.getByText(/首次连接前请先退出/)).toHaveTextContent(
-    "保留登录和 Bot 数据",
-  );
+  const button = await screen.findByRole("button", { name: "检查云端兼容性" });
+  expect(screen.getByText(/面板运行在你的 Grok Bot 云端/)).toBeInTheDocument();
   expect(screen.getByText(/切换会影响当前云端/)).toHaveTextContent(
-    "供应商地址和密钥",
+    "供应商密钥保存在该云端",
   );
   await user.dblClick(button);
   expect(await screen.findByText("已连接 Grok Bot。")).toBeInTheDocument();
   expect(
-    screen.queryByRole("button", { name: "连接 Grok Bot" }),
+    screen.queryByRole("button", { name: "检查云端兼容性" }),
   ).not.toBeInTheDocument();
   expect(
     vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/connect"),
@@ -555,6 +553,7 @@ test("first connection errors remain inline and do not claim connection", async 
     if (url === "/api/status")
       return json({
         ...current,
+        connectionMode: "independent",
         runtimeKind: null,
         host: { wired: false },
         client: {
@@ -563,15 +562,15 @@ test("first connection errors remain inline and do not claim connection", async 
           providerSwitchReady: false,
         },
       });
-    return json({ error: { message: "请先退出 Grok Bot，再连接。" } }, 409);
+    return json({ error: { message: "请检查云端连接。" } }, 409);
   });
   const user = userEvent.setup();
   render(<App />);
   await user.click(
-    await screen.findByRole("button", { name: "连接 Grok Bot" }),
+    await screen.findByRole("button", { name: "检查云端兼容性" }),
   );
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "请先退出 Grok Bot",
+    "请检查云端连接",
   );
   expect(screen.queryByText("已连接 Grok Bot。")).not.toBeInTheDocument();
 });

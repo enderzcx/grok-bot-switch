@@ -26,6 +26,8 @@ export interface Profile {
   };
 }
 export interface Status {
+  connectionMode?: "desktop" | "independent";
+  pairing?: { configured: boolean; defaultRelayUrl: string };
   desiredProfile: string;
   activeProfile: string | null;
   observedProfile?: string | null;
@@ -36,6 +38,10 @@ export interface Status {
   client?: {
     connected: boolean;
     mode: "probe" | "native-switch";
+    transport?: string;
+    error?: { code: string; message: string };
+    pairingConfirmed?: boolean;
+    pairedInstanceId?: string;
     hostReachable: boolean;
     providerSwitchReady: boolean;
     runtime?: Record<string, unknown>;
@@ -144,6 +150,11 @@ const labels: Record<string, string> = {
   "needs-key": "未安装密钥",
   "secret-rejected": "密钥文件不安全",
   "busy-agent": "主机有任务运行中",
+  "unknown-host-state": "当前云端版本或状态尚未支持，未执行切换",
+  "unsupported-supervisor": "当前云端重启组件尚未支持",
+  "host-unreachable": "暂时无法连接云端运行服务",
+  "active-state-drift": "云端运行状态已变化，请检查后再切换",
+  "activation-in-progress": "正在处理上一项切换，请先检查进度",
   "pending-command": "主机有待处理命令",
   "unknown-hash": "主机版本未验证",
   drift: "主机状态与配置不一致",

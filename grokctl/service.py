@@ -160,8 +160,11 @@ class GrokctlService:
         payload.update(lab_runtime_fields(config))
         return payload
 
-    def status(self) -> dict[str, object]:
+    def connection_info(self) -> dict[str, object]:
         from grokctl.installation import discover_installation
+        return {"connectionMode": "desktop", "installation": discover_installation()}
+
+    def status(self) -> dict[str, object]:
         profiles = self.registry.list_profiles()
         installed = 0
         for profile in profiles:
@@ -176,7 +179,7 @@ class GrokctlService:
             providers=len(profiles),
             secrets_installed=installed,
         )
-        result["installation"] = discover_installation()
+        result.update(self.connection_info())
         native = self._native()
         if native is not None:
             client = native.client_status()
