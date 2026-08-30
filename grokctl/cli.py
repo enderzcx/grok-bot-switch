@@ -345,9 +345,6 @@ def _dispatch(service: GrokctlService, args: argparse.Namespace, stdin: Any) -> 
             payload = service.show_host()
             return payload, _format_host(payload)
         raise ValidationError("请指定 host 子命令")
-    if command == "ui":
-        service.ui(port=int(args.port))
-        raise NotWiredError("本地面板尚未接入")
     raise ValidationError("未知命令")
 
 
@@ -377,6 +374,24 @@ def main(
         if args.command is None:
             raise ValidationError("请指定命令")
         service = GrokctlService(resolve_home(home, env))
+        if args.command == "ui":
+            from grokctl.ui import ProviderPanel
+
+            panel = ProviderPanel(service, port=int(args.port))
+            panel.start()
+            try:
+                if json_mode:
+                    _emit_json({"url": panel.url, "loopbackOnly": True}, stdout)
+                else:
+                    _emit_lines([f"本地面板 {panel.url}", "按 Ctrl+C 关闭"], stdout)
+                stdout.flush()
+                # The server owns its thread; the CLI only owns its lifetime.
+                panel.wait()
+                return 0
+            except KeyboardInterrupt:
+                return 0
+            finally:
+                panel.stop()
         payload, lines = _dispatch(service, args, stdin)
         if json_mode:
             _emit_json(payload, stdout)

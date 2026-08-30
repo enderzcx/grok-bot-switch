@@ -644,6 +644,3 @@ class GrokctlService:
             if isinstance(item, dict):
                 events.append(item)
         return {"schemaVersion": SCHEMA_VERSION, "events": events[-limit:]}
-
-    def ui(self, *, port: int = 0) -> dict[str, object]:
-        raise NotWiredError("本地面板尚未接入")

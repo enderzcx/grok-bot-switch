@@ -13,6 +13,7 @@
     healthy: "正常",
     drift: "偏差",
     blocked: "未接入",
+    lab: "模拟环境",
     switching: "正在切换",
     error: "出错",
   };
@@ -27,6 +28,7 @@
     fallback: document.getElementById("metric-fallback"),
     endpoint: document.getElementById("route-endpoint"),
     drift: document.getElementById("route-drift"),
+    runtimeNote: document.getElementById("runtime-note"),
     listStatus: document.getElementById("list-status"),
     providers: document.getElementById("providers"),
     review: document.getElementById("review"),
@@ -139,6 +141,7 @@
   function routeKind(status) {
     if (!status) return "loading";
     var host = status.host || {};
+    if (status.runtimeKind === "lab-synthetic") return "lab";
     var desired = status.desiredProfile || "official";
     var observed = status.activeProfile;
     var hostState = host.state || "unknown";
@@ -156,6 +159,8 @@
     els.route.dataset.state = kind;
     els.route.setAttribute("aria-busy", kind === "loading" ? "true" : "false");
     els.flag.textContent = STATE_LABEL[kind] || kind;
+    show(els.runtimeNote, kind === "lab");
+    text(els.runtimeNote, "当前连接的是本地模拟环境，不代表 Grok Bot 主机状态。真实主机接入尚未开放。");
     if (err) {
       text(els.title, err.message || "无法读取状态");
       text(els.desired, "—");
@@ -334,9 +339,9 @@
       return;
     }
     if (kind === "rollback") {
-      text(els.reviewTitle, "回滚计划");
-      text(els.reviewNote, "现在不会改主机。确认后才会回滚。");
-      els.reviewApply.textContent = "确认回滚";
+      text(els.reviewTitle, "切回上一通道");
+      text(els.reviewNote, "按当前配置重新切换，不会按历史快照原样恢复。");
+      els.reviewApply.textContent = "确认切回";
       els.reviewApply.className = "danger-quiet";
       api("POST", "/api/rollback", { apply: false }).then(fillPlan).catch(reviewFail);
       return;
@@ -380,6 +385,14 @@
     if (blocking.indexOf("needs-key") !== -1) addReason("未安装密钥");
     if (blocking.indexOf("secret-rejected") !== -1) addReason("密钥不可用");
     if (blocking.indexOf("not-wired") !== -1) addReason("主机未接入");
+    if (plan.runtimeKind === "lab-synthetic") {
+      text(els.reviewNote, "这是本地模拟环境，不会切换真实 Grok Bot 主机。");
+      if (!plan.allowSyntheticApply) addReason("模拟切换未启用");
+    }
+    var blockerLabels = {"busy-agent": "主机有任务运行中", "pending-command": "主机有待处理命令", "unknown-hash": "主机版本尚未验证", "drift": "主机状态与配置不一致", "missing-receipt": "缺少切换回执", "snapshot-mismatch": "历史快照校验失败", "unsafe-endpoint": "供应商地址未通过安全校验", "disabled": "提供方已停用"};
+    blocking.forEach(function (code) {
+      if (["needs-key", "secret-rejected", "not-wired"].indexOf(code) === -1) addReason(blockerLabels[code] || "尚未满足切换条件");
+    });
     if (reasons.length) {
       els.reviewBlock.hidden = false;
       els.reviewBlock.textContent = reasons.join("；");

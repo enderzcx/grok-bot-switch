@@ -5,7 +5,6 @@ from __future__ import annotations
 import hmac
 import io
 import json
-import os
 import re
 import secrets
 import sys
@@ -15,7 +14,6 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, unquote, urlparse
 
-from grokctl.cli import resolve_home
 from grokctl.models import (
     ConflictError,
     GrokctlError,
@@ -215,6 +213,11 @@ class ProviderPanel:
         self.bind()
         assert self._httpd is not None
         self._httpd.serve_forever()
+
+    def wait(self) -> None:
+        """Block the CLI while the server thread is alive, interruptibly."""
+        while self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.5)
 
     def stop(self) -> None:
         httpd = self._httpd
@@ -562,58 +565,9 @@ def start_panel(
 
 
 def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    environ = os.environ if env is None else env
-    home: str | None = None
-    port = 0
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        if arg == "--home":
-            i += 1
-            if i >= len(args):
-                sys.stderr.write("参数无效\n")
-                return 2
-            home = args[i]
-        elif arg.startswith("--home="):
-            home = arg.split("=", 1)[1]
-        elif arg == "--port":
-            i += 1
-            if i >= len(args):
-                sys.stderr.write("参数无效\n")
-                return 2
-            try:
-                port = int(args[i])
-            except ValueError:
-                sys.stderr.write("端口无效\n")
-                return 2
-        elif arg.startswith("--port="):
-            try:
-                port = int(arg.split("=", 1)[1])
-            except ValueError:
-                sys.stderr.write("端口无效\n")
-                return 2
-        else:
-            sys.stderr.write("参数无效\n")
-            return 2
-        i += 1
-    try:
-        service = GrokctlService(resolve_home(home, environ))
-        panel = ProviderPanel(service, host=BIND_HOST, port=port)
-        panel.bind()
-        sys.stdout.write(f"本地面板 {panel.url}\n")
-        sys.stdout.flush()
-        panel.serve_forever()
-        return 0
-    except GrokctlError as exc:
-        sys.stderr.write(exc.message + "\n")
-        return exc.exit_code
-    except KeyboardInterrupt:
-        return 0
-    finally:
-        existing = locals().get("panel")
-        if isinstance(existing, ProviderPanel):
-            existing.stop()
+    from grokctl.cli import main as cli_main
+
+    return cli_main(["ui", *list(sys.argv[1:] if argv is None else argv)], env=env)
 
 
 if __name__ == "__main__":

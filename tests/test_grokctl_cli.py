@@ -11,6 +11,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.request
+import signal
+import select
 from pathlib import Path
 
 
@@ -191,14 +194,35 @@ class CliTest(unittest.TestCase):
         self.assertIn("provider.added", types)
         blob = json.dumps(activity.json())
         self.assertNotIn(self.secret.decode("ascii"), blob)
-        ui = self.run_cli(["ui", "--port", "0"], json_mode=True)
-        self.assertEqual(ui.code, 3)
+        ui = self.run_cli(["ui", "--port", "-1"], json_mode=True)
+        self.assertEqual(ui.code, 2)
 
     def test_json_flag_after_command(self) -> None:
         result = self.run_cli(["status", "--json"])
         self.assertEqual(result.code, 0)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["desiredProfile"], "official")
+
+    def test_ui_cli_serves_loopback_and_stops_cleanly(self) -> None:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "grokctl", "--home", str(self.home), "ui", "--port", "0"],
+            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            self.assertTrue(select.select([process.stdout], [], [], 10)[0], "UI did not start")
+            line = process.stdout.readline()
+            self.assertTrue(line.startswith("本地面板 http://127.0.0.1:"), line)
+            url = line.strip().split(" ")[-1]
+            with urllib.request.urlopen(url + "/api/status", timeout=5) as response:
+                status = json.load(response)
+            self.assertFalse(status["host"]["wired"])
+            process.send_signal(signal.SIGINT)
+            process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            process.communicate(timeout=5)
 
     def test_human_output_is_chinese_first(self) -> None:
         self.add_profile()
