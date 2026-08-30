@@ -89,6 +89,26 @@ class NativeRunnerTests(unittest.TestCase):
         self.assertEqual(runner.public_error(ValueError("host-not-healthy-idle")), "native-operation-failed")
         self.assertEqual(runner.public_error(ActivationError("SECRET_SENTINEL")), "native-operation-failed")
 
+    def test_receipts_are_bounded_owned_and_redacted(self):
+        ensure_private_dir(self.root / "generations")
+        directory = self.root / "generations/2-12345678-1234-1234-1234-123456789012"
+        path = directory / "provider-receipts.jsonl"
+        row = {"profileId":"custom","model":"grok-4.6","status":200,"streaming":True,
+               "upstreamRequestId":"request-123","secret":"SECRET_SENTINEL","body":"PRIVATE_PROMPT"}
+        atomic_replace(path, json.dumps(row).encode() + b"\n")
+        active = {"target":"custom","generation":2,"hop":{"configPath":str(directory / "hop.json")}}
+        result = runner.recent_receipts(active)
+        self.assertEqual(result[0]["upstreamRequestId"], "request-123")
+        self.assertNotIn("SENTINEL", json.dumps(result))
+        self.assertNotIn("PRIVATE_PROMPT", json.dumps(result))
+        path.chmod(0o644)
+        self.assertEqual(runner.recent_receipts(active), [])
+        path.chmod(0o600)
+        active["target"] = "foreign"
+        self.assertEqual(runner.recent_receipts(active), [])
+        active["hop"]["configPath"] = str(self.root / "foreign/hop.json")
+        self.assertEqual(runner.recent_receipts(active), [])
+
 
 if __name__ == "__main__":
     unittest.main()

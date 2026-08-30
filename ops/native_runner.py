@@ -5,6 +5,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import stat
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +15,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE))
 
 from grokctl.profiles import atomic_replace, ensure_private_dir, _file_is_private_regular
+from grokctl.models import ValidationError
 from ops.native_controller import NativeHost
 from ops.patch_grok_host_provider_switcher import (
     SUPPORTED_STOCK_SHA256, apply_patch,
@@ -86,6 +89,52 @@ def _private_json(path: Path) -> dict | None:
     return result
 
 
+def recent_receipts(active: dict | None) -> list:
+    """Read only bounded, redacted receipts belonging to the active generation."""
+    hop = (active or {}).get("hop")
+    if not isinstance(hop, dict):
+        return []
+    config = Path(hop.get("configPath", ""))
+    if (config.name != "hop.json" or config.parent.parent != ROOT / "generations"
+            or not re.fullmatch(r"[1-9][0-9]*-[a-f0-9-]{36}", config.parent.name)):
+        return []
+    path = config.parent / "provider-receipts.jsonl"
+    try:
+        for directory in (ROOT, ROOT / "generations", config.parent):
+            info = directory.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
+                return []
+        _file_is_private_regular(path)
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
+                return []
+            stream.seek(max(0, info.st_size - 65536))
+            lines = stream.read(65536).splitlines()
+        receipts = []
+        for line in lines[-8:]:
+            try:
+                row = json.loads(line)
+                if row.get("profileId") != active.get("target"):
+                    continue
+                result = {"profileId": active["target"], "generation": active["generation"]}
+                for key in ("at", "protocol", "model", "upstreamRequestId"):
+                    value = row.get(key)
+                    if isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_.:+/-]{1,128}", value):
+                        result[key] = value
+                for key in ("status", "durationMs"):
+                    if type(row.get(key)) is int and row[key] >= 0:
+                        result[key] = row[key]
+                if type(row.get("streaming")) is bool:
+                    result["streaming"] = row["streaming"]
+                receipts.append(result)
+            except (ValueError, AttributeError):
+                continue
+        return receipts
+    except (OSError, ValueError, ValidationError):
+        return []
+
+
 def inspect(host: NativeHost) -> dict:
     """Fresh readback only: this never advances a pending transaction."""
     observation = host.read_observation()
@@ -131,6 +180,7 @@ def inspect(host: NativeHost) -> dict:
             "desiredProfile": (job or {}).get("target") or current or "official",
             "previousProfile": ((job or {}).get("previousActive") or {}).get("target", "official") if job and job.get("status") == "verified" else None,
             "profileDigest": (active or {}).get("profileDigest"), "blocking": blocking,
+            "recentReceipts": recent_receipts(active) if current else [],
             "observation": observation,
             "activation": {key: job.get(key) for key in ("id", "status", "phase", "error", "target", "generation")} if job else None}
 

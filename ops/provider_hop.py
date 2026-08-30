@@ -567,6 +567,12 @@ def _build_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(RefuseRedirect(), urllib.request.ProxyHandler({}))
 
 
+def _safe_request_id(value: str, secret: Optional[str]) -> str:
+    if not re.fullmatch(r"[a-zA-Z0-9_.:-]{1,128}", value) or (secret and secret in value):
+        return ""
+    return value
+
+
 def _receipt_payload(
     runtime: HopRuntime,
     *,
@@ -722,6 +728,7 @@ def make_handler(runtime: HopRuntime):
                     or response.headers.get("request-id")
                     or ""
                 )
+                request_id = _safe_request_id(request_id, runtime.secret)
                 content_type = response.headers.get("Content-Type", "")
                 transfer = (response.headers.get("Transfer-Encoding") or "").lower()
                 streaming = "text/event-stream" in content_type or "chunked" in transfer

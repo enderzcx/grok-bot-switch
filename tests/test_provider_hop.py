@@ -36,6 +36,13 @@ def load_hop():
 HOP = load_hop()
 
 
+class RequestIdTests(unittest.TestCase):
+    def test_receipt_id_cannot_echo_credentials_or_control_text(self):
+        self.assertEqual(HOP._safe_request_id("upstream-123", SECRET_VALUE), "upstream-123")
+        for value in (SECRET_VALUE, "prefix-" + SECRET_VALUE, "a\nb", "x" * 129):
+            self.assertEqual(HOP._safe_request_id(value, SECRET_VALUE), "")
+
+
 class UpstreamHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
