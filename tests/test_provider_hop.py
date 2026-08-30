@@ -472,6 +472,60 @@ class HopTestCase(unittest.TestCase):
         with self.assertRaises(HOP.HopError):
             HOP.load_secret(link)
 
+    def test_resolve_endpoint_preserves_query_and_path_overrides(self) -> None:
+        drifted = "https://api.example.com/v1?api-version=2024-01-01/chat/completions"
+        joined = HOP.resolve_endpoint(
+            "openai-chat",
+            "https://api.example.com/v1?api-version=2024-01-01",
+            None,
+        )
+        self.assertEqual(
+            joined,
+            "https://api.example.com/v1/chat/completions?api-version=2024-01-01",
+        )
+        self.assertNotEqual(joined, drifted)
+        override = HOP.resolve_endpoint(
+            "openai-chat",
+            "https://gateway.example/prefix/v1?api-version=2024-02-15",
+            "/custom/chat",
+        )
+        self.assertEqual(
+            override,
+            "https://gateway.example/prefix/v1/custom/chat?api-version=2024-02-15",
+        )
+        responses = HOP.resolve_endpoint(
+            "openai-responses",
+            "https://api.example.com/v1?api-version=2024-01-01",
+            None,
+        )
+        self.assertEqual(
+            responses,
+            "https://api.example.com/v1/responses?api-version=2024-01-01",
+        )
+        with self.assertRaises(HOP.HopError):
+            HOP.resolve_endpoint(
+                "openai-chat",
+                "https://api.example.com/v1?api-version=2024-01-01",
+                "/chat?extra=1",
+            )
+        with self.assertRaises(HOP.HopError):
+            HOP.resolve_endpoint("openai-chat", "https://api.example.com/v1#frag", None)
+
+    def test_query_on_resolved_endpoint_is_forwarded_upstream(self) -> None:
+        port = int(self.upstream.server_address[1])
+        resolved = "http://127.0.0.1:%d/v1/chat/completions?api-version=2024-01-01" % port
+        base = self._start_hop(resolvedEndpoint=resolved, endpointPath="/v1/chat/completions")
+        status, _body, _headers = self._request(
+            base + "/v1/chat/completions",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.upstream.requests[-1]["path"],
+            "/v1/chat/completions?api-version=2024-01-01",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

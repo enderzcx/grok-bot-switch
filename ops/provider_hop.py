@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Mapping, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 
 MAX_BODY = 64 * 1024 * 1024
@@ -252,6 +252,13 @@ def validate_endpoint(url: str, *, allow_http_loopback: bool = True) -> Tuple[st
 
 
 def resolve_endpoint(protocol: str, base_url: str, endpoint_path: Optional[str] = None) -> str:
+    """Join protocol default or override path onto base_url.
+
+    Query strings stay in the query component. Concatenating the path after
+    '?' produces a wrong upstream wire URL. This helper is duplicated on
+    purpose: the hop is deployed standalone and must not import grokctl.
+    """
+
     if protocol not in PROTOCOLS:
         raise HopError("unsupported protocol")
     if not isinstance(base_url, str) or not base_url:
@@ -259,11 +266,16 @@ def resolve_endpoint(protocol: str, base_url: str, endpoint_path: Optional[str] 
     path = endpoint_path if endpoint_path not in (None, "") else PROTOCOL_DEFAULT_PATHS[protocol]
     if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
         raise HopError("unsafe url")
-    if "://" in path or "\\" in path or any(ch in path for ch in "\r\n\t "):
+    if "://" in path or "\\" in path or any(ch in path for ch in "\r\n\t ?#"):
         raise HopError("unsafe url")
     if any(part == ".." for part in path.split("/")):
         raise HopError("unsafe url")
-    resolved = base_url.rstrip("/") + path
+    parts = urlsplit(base_url)
+    if parts.fragment:
+        raise HopError("unsafe url")
+    resolved = urlunsplit(
+        (parts.scheme, parts.netloc, parts.path.rstrip("/") + path, parts.query, "")
+    )
     validate_endpoint(resolved)
     return resolved
 

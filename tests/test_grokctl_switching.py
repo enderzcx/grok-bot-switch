@@ -26,12 +26,15 @@ from grokctl.remote import (  # noqa: E402
     load_provider_hop,
     sha256_file,
 )
+from grokctl.models import join_endpoint, official_profile, parse_profile  # noqa: E402
+from grokctl.profiles import ProfileRegistry  # noqa: E402
 from grokctl.switching import (  # noqa: E402
     HOST_HOP_TIMEOUT_SEC,
     ArtifactSet,
     ProfileCatalog,
     SwitchEngine,
     SwitchError,
+    profile_digest,
 )
 
 
@@ -575,6 +578,91 @@ class SwitchTransactionTests(unittest.TestCase):
         again = catalog.get("custom-openai")
         self.assertEqual(again["id"], "custom-openai")
         self.assertEqual(again["auth"]["type"], "bearer")
+
+    def test_official_digest_matches_registry_and_canonical_model(self) -> None:
+        catalog_official = self.catalog.get("official")
+        model_official = official_profile()
+        registry = ProfileRegistry(self.root / "registry-home")
+        self.assertEqual(catalog_official["displayName"], "官方 Grok")
+        self.assertIsNone(catalog_official["protocol"])
+        self.assertTrue(catalog_official["builtIn"])
+        self.assertEqual(profile_digest(catalog_official), model_official.digest())
+        self.assertEqual(registry.get("official").digest(), model_official.digest())
+        self.assertEqual(profile_digest(catalog_official), registry.get("official").digest())
+        official_plan = self.engine.plan("official")
+        self.assertEqual(official_plan.profile_digest, model_official.digest())
+
+    def test_query_join_preview_matches_compiled_host_and_hop(self) -> None:
+        payload = load_profile("profile-custom-openai.json")
+        payload["baseUrl"] = "https://api.example.com/v1?api-version=2024-01-01"
+        catalog = ProfileCatalog.from_mapping(
+            {
+                "custom-openai": payload,
+                "other-profile": load_profile("profile-other.json"),
+            }
+        )
+        engine = SwitchEngine(self.runtime, catalog, self.artifacts)
+        plan = engine.plan("custom-openai")
+        expected = "https://api.example.com/v1/chat/completions?api-version=2024-01-01"
+        preview = parse_profile(payload).resolved_endpoint()
+        hop_config = self._hop_config(plan)
+        host_config = self._host_config(plan)
+        self.assertEqual(preview, expected)
+        self.assertEqual(plan.resolved_endpoint, expected)
+        self.assertEqual(hop_config["resolvedEndpoint"], expected)
+        self.assertEqual(host_config["endpointPath"], "/v1/chat/completions")
+        self.assertEqual(hop_config["endpointPath"], "/v1/chat/completions")
+        self.assertNotIn("api-version=2024-01-01/chat", hop_config["resolvedEndpoint"])
+        drifted = "https://api.example.com/v1?api-version=2024-01-01/chat/completions"
+        self.assertNotEqual(plan.resolved_endpoint, drifted)
+
+    def test_endpoint_path_override_keeps_query_on_compiled_wire(self) -> None:
+        payload = load_profile("profile-custom-openai.json")
+        payload["baseUrl"] = "https://gateway.example/prefix/v1?api-version=2024-02-15"
+        payload["endpointPath"] = "/custom/chat"
+        catalog = ProfileCatalog.from_mapping(
+            {
+                "custom-openai": payload,
+                "other-profile": load_profile("profile-other.json"),
+            }
+        )
+        engine = SwitchEngine(self.runtime, catalog, self.artifacts)
+        plan = engine.plan("custom-openai")
+        expected = "https://gateway.example/prefix/v1/custom/chat?api-version=2024-02-15"
+        self.assertEqual(parse_profile(payload).resolved_endpoint(), expected)
+        self.assertEqual(plan.resolved_endpoint, expected)
+        hop_config = self._hop_config(plan)
+        host_config = self._host_config(plan)
+        self.assertEqual(hop_config["resolvedEndpoint"], expected)
+        self.assertEqual(hop_config["endpointPath"], "/prefix/v1/custom/chat")
+        self.assertEqual(host_config["endpointPath"], hop_config["endpointPath"])
+
+    def test_join_endpoint_equals_hop_resolve_across_layers(self) -> None:
+        hop = self._hop
+        cases = (
+            ("openai-chat", "https://api.example.com/v1", None),
+            ("openai-chat", "https://api.example.com/v1?api-version=2024-01-01", None),
+            ("openai-chat", "https://api.example.com/v1?api-version=2024-01-01", "/chat/completions"),
+            ("openai-chat", "https://gateway.example/prefix/v1?api-version=2024-02-15", "/custom/chat"),
+            ("openai-responses", "https://api.example.com/v1?api-version=2024-01-01", None),
+            ("anthropic-messages", "https://api.example.com/v1", "/messages"),
+            ("openai-chat", "http://127.0.0.1:18779/v1", None),
+            ("openai-chat", "https://api.example.com", "/chat/completions"),
+        )
+        defaults = {
+            "openai-chat": "/chat/completions",
+            "openai-responses": "/responses",
+            "anthropic-messages": "/messages",
+        }
+        for protocol, base_url, endpoint_path in cases:
+            path = endpoint_path or defaults[protocol]
+            preview = join_endpoint(base_url, path)
+            compiled = hop.resolve_endpoint(protocol, base_url, endpoint_path)
+            self.assertEqual(preview, compiled, (protocol, base_url, endpoint_path))
+            if "?" in base_url:
+                self.assertNotIn("/chat/completions", compiled.split("?", 1)[1])
+                self.assertNotIn("/responses", compiled.split("?", 1)[1])
+                self.assertNotIn("/custom/chat", compiled.split("?", 1)[1])
 
 
 if __name__ == "__main__":

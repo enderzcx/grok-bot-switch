@@ -13,11 +13,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Mapping, Optional, Tuple
 
+from grokctl.models import (
+    OFFICIAL_ID,
+    ProviderProfile,
+    ValidationError,
+    canonical_dumps,
+    official_profile,
+    parse_profile,
+)
 from grokctl.remote import (
     HostError,
     HostRuntime,
     atomic_write_bytes,
-    canonical_json,
     isoformat_z,
     load_provider_hop,
     sha256_bytes,
@@ -25,39 +32,8 @@ from grokctl.remote import (
 )
 
 
-OFFICIAL_ID = "official"
-OFFICIAL_PROFILE = {
-    "schemaVersion": 1,
-    "id": OFFICIAL_ID,
-    "displayName": "Official Grok",
-    "protocol": "native",
-    "fallbackPolicy": "never",
-    "enabled": True,
-}
 # Finite hop timeout aligned with provider-direct host request deadline (120s).
 HOST_HOP_TIMEOUT_SEC = 120
-REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
-ALLOWED_PARAMETER_KEYS = frozenset({"reasoningEffort", "maxTokens"})
-ANTHROPIC_PROTOCOL = "anthropic-messages"
-FORBIDDEN_PROFILE_KEYS = frozenset(
-    {
-        "apikey",
-        "api_key",
-        "authorization",
-        "cookie",
-        "credential",
-        "credentials",
-        "key",
-        "keyfile",
-        "oauth",
-        "password",
-        "secret",
-        "token",
-        "accesstoken",
-        "refreshtoken",
-    }
-)
-ALLOWED_KEY_EXCEPTIONS = frozenset({"secretref"})
 
 
 class SwitchError(RuntimeError):
@@ -78,81 +54,59 @@ def _wrap(exc: Exception) -> SwitchError:
 
 
 def profile_digest(profile: Mapping[str, object]) -> str:
-    return sha256_bytes(canonical_json(profile).encode("utf-8"))
+    return parse_profile(profile, allow_official=True).digest()
 
 
-def _assert_no_secret_material(value: object) -> None:
-    if isinstance(value, Mapping):
-        for key, child in value.items():
-            lowered = str(key).lower().replace("-", "")
-            if lowered in FORBIDDEN_PROFILE_KEYS and lowered not in ALLOWED_KEY_EXCEPTIONS:
-                raise SwitchError("profile must not contain secret material", "invalid_profile")
-            _assert_no_secret_material(child)
-    elif isinstance(value, list):
-        for child in value:
-            _assert_no_secret_material(child)
+def _switch_from_validation(exc: ValidationError) -> SwitchError:
+    message = str(exc)
+    if "请求头" in message:
+        code = "unsafe_header"
+    elif "地址" in message or message.startswith("endpointPath") or "baseUrl 路径" in message:
+        code = "unsafe_endpoint"
+    else:
+        code = "invalid_profile"
+    return SwitchError(message, code)
 
 
-def _compile_parameters(profile: Mapping[str, object], protocol: str) -> Dict[str, object]:
-    raw = profile.get("parameters")
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise SwitchError("invalid parameters", "invalid_profile")
-    _assert_no_secret_material(raw)
-    unknown = set(raw) - ALLOWED_PARAMETER_KEYS
-    if unknown:
-        raise SwitchError("unsupported parameter", "invalid_profile")
-    out: Dict[str, object] = {}
-    if "reasoningEffort" in raw:
-        effort = raw["reasoningEffort"]
-        if not isinstance(effort, str) or effort not in REASONING_EFFORTS:
-            raise SwitchError("invalid reasoningEffort", "invalid_profile")
-        if protocol == ANTHROPIC_PROTOCOL:
-            raise SwitchError(
-                "reasoningEffort is unrepresentable for Anthropic Messages",
-                "invalid_profile",
-            )
-        out["reasoningEffort"] = effort
-    if "maxTokens" in raw:
-        tokens = raw["maxTokens"]
-        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 1 or tokens > 1_000_000:
-            raise SwitchError("invalid maxTokens", "invalid_profile")
-        out["maxTokens"] = tokens
-    return out
+def _switch_from_hop(exc: Exception) -> SwitchError:
+    code = "unsafe_header" if "header" in str(exc).lower() else "unsafe_endpoint"
+    return SwitchError(str(exc), code)
+
+
+def _assert_hop_transport(parsed: ProviderProfile) -> str:
+    """SSRF/DNS/header/auth checks are hop transport, not a second profile schema."""
+
+    hop = load_provider_hop()
+    if parsed.auth.type.value not in hop.AUTH_TYPES:
+        raise SwitchError("unsupported auth type", "invalid_profile")
+    try:
+        hop.validate_headers({name: value for name, value in parsed.headers})
+        hop_resolved = hop.resolve_endpoint(
+            parsed.protocol.value if parsed.protocol is not None else "",
+            str(parsed.base_url or ""),
+            parsed.endpoint_path,
+        )
+    except hop.HopError as exc:
+        raise _switch_from_hop(exc) from exc
+    preview = parsed.resolved_endpoint()
+    if hop_resolved != preview:
+        raise SwitchError("resolved endpoint does not match profile preview", "unsafe_endpoint")
+    return hop_resolved
 
 
 def normalize_profile(profile: Mapping[str, object]) -> Dict[str, object]:
     if not isinstance(profile, Mapping):
         raise SwitchError("invalid profile", "invalid_profile")
-    _assert_no_secret_material(profile)
-    payload = json.loads(canonical_json(profile))
-    profile_id = str(payload.get("id") or "")
-    if not profile_id:
-        raise SwitchError("profile id is required", "invalid_profile")
-    if profile_id != OFFICIAL_ID:
-        hop = load_provider_hop()
-        protocol = str(payload.get("protocol") or "")
-        if protocol not in hop.PROTOCOLS:
-            raise SwitchError("unsupported protocol", "invalid_profile")
-        if payload.get("fallbackPolicy") != "never":
-            raise SwitchError("fallback must be never", "invalid_profile")
-        if payload.get("enabled") is not True:
-            raise SwitchError("profile is not enabled", "invalid_profile")
-        auth = payload.get("auth") or {}
-        if not isinstance(auth, dict):
-            raise SwitchError("invalid auth block", "invalid_profile")
-        auth_type = str(auth.get("type") or "")
-        if auth_type not in hop.AUTH_TYPES:
-            raise SwitchError("unsupported auth type", "invalid_profile")
-        headers = payload.get("headers") or {}
-        try:
-            hop.validate_headers(headers)
-            hop.resolve_endpoint(protocol, str(payload.get("baseUrl") or ""), payload.get("endpointPath"))
-        except hop.HopError as exc:
-            code = "unsafe_header" if "header" in str(exc) else "unsafe_endpoint"
-            raise SwitchError(str(exc), code) from exc
-        payload["parameters"] = _compile_parameters(payload, protocol)
+    try:
+        parsed = parse_profile(profile, allow_official=True)
+    except ValidationError as exc:
+        raise _switch_from_validation(exc) from exc
+    payload = parsed.to_canonical_dict()
+    if parsed.id == OFFICIAL_ID:
+        return payload
+    if parsed.enabled is not True:
+        raise SwitchError("profile is not enabled", "invalid_profile")
+    _assert_hop_transport(parsed)
     return payload
 
 
@@ -319,6 +273,8 @@ class ActivationReceipt:
 
 @dataclass(frozen=True)
 class ProfileCatalog:
+    """Injected fixture catalog. Official is the canonical built-in profile."""
+
     profiles: Tuple[Tuple[str, str], ...] = ()
 
     @classmethod
@@ -329,12 +285,12 @@ class ProfileCatalog:
             profile_id = str(normalized.get("id") or "")
             if str(key) != profile_id:
                 raise SwitchError("profile mapping key must match id", "invalid_profile")
-            items.append((profile_id, canonical_json(normalized)))
+            items.append((profile_id, canonical_dumps(normalized)))
         return cls(tuple(items))
 
     def get(self, profile_id: str) -> Dict[str, object]:
         if profile_id == OFFICIAL_ID:
-            return json.loads(canonical_json(OFFICIAL_PROFILE))
+            return json.loads(canonical_dumps(official_profile().to_canonical_dict()))
         for key, blob in self.profiles:
             if key == profile_id:
                 return json.loads(blob)
@@ -394,8 +350,8 @@ class SwitchEngine:
                 raise SwitchError("unknown bundle hash", "unknown_hash")
             protocol = str(profile["protocol"])
             model = str(profile["model"])
-            endpoint_path = profile.get("endpointPath")
-            resolved = self._hop.resolve_endpoint(protocol, str(profile["baseUrl"]), endpoint_path)
+            parsed = parse_profile(profile, allow_official=False)
+            resolved = _assert_hop_transport(parsed)
             origin, resolved_path, _query = self._hop.validate_endpoint(resolved)
             auth = profile.get("auth") or {}
             auth_type = str(auth.get("type"))
