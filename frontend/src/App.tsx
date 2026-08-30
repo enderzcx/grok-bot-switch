@@ -672,8 +672,8 @@ export default function App() {
               <Button variant="outline" disabled={disabled} onClick={() => void connect()}>检查云端兼容性</Button>
             </div>
           )}
-          {!isLab && !independent && (
-            <p className="mt-3 text-sm text-muted-foreground">请将独立安装包和附带的安装提示词交给 Grok Bot，然后在它的云端浏览器打开管理面板。本机窗口不能直接控制云端。</p>
+          {!loading && status && !isLab && !independent && (
+            <p className="mt-3 text-sm text-muted-foreground">请将发布页的安装提示词交给 Grok Bot，它会自行下载并安装。然后在它的云端浏览器打开管理面板。本机窗口不能直接控制云端。</p>
           )}
           {!isLab && (installed || status?.client) && (
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
