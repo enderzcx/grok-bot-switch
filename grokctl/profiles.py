@@ -158,9 +158,8 @@ class ProfileRegistry:
         if profile_id not in profiles:
             raise NotFoundError(f"未找到提供方 {profile_id}")
         if isinstance(raw, ProviderProfile):
-            incoming = raw
-        else:
-            incoming = parse_profile(raw, allow_official=False)
+            raw = raw.to_canonical_dict()
+        incoming = parse_profile(raw, allow_official=False)
         if incoming.id != profile_id:
             raise ConflictError("提供方编号不能修改")
         if incoming.built_in:

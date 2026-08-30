@@ -184,7 +184,7 @@ class GrokctlService:
             if incoming.id != existing.id:
                 raise ConflictError("提供方编号不能修改")
             secret = self._secret_for(existing)
-            if secret.installed and incoming.auth.type != existing.auth.type:
+            if (secret.installed or secret.rejected) and incoming.auth.type != existing.auth.type:
                 raise ConflictError("请先移除密钥，再更改认证方式")
             updated = self.registry.update(existing.id, incoming)
             self._append_activity("provider.updated", profile_id=updated.id)

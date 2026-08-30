@@ -13,6 +13,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 from unittest.mock import patch
@@ -97,6 +98,14 @@ class IsolatedHomeTest(unittest.TestCase):
 
 
 class RegistryEditTests(IsolatedHomeTest):
+    def test_typed_profile_still_validates_before_save(self) -> None:
+        registry = self.registry()
+        original = registry.add(sample_profile())
+        before = registry.path.read_bytes()
+        with self.assertRaises(ValidationError):
+            registry.update(original.id, replace(original, model=""))
+        self.assertEqual(registry.path.read_bytes(), before)
+
     def test_update_replaces_nonsecret_fields(self) -> None:
         registry = self.registry()
         registry.add(sample_profile())
@@ -136,6 +145,15 @@ class RegistryEditTests(IsolatedHomeTest):
 
 
 class ServiceEditTests(IsolatedHomeTest):
+    def test_unsafe_existing_secret_still_blocks_auth_type_change(self) -> None:
+        service = self.service()
+        service.add_provider(sample_profile())
+        service.set_secret("custom-openai", _Bytes(SECRET_MARKER.encode("ascii")))
+        os.chmod(service.secrets.path_for("custom-openai"), 0o644)
+        with self.assertRaises(ConflictError):
+            service.update_provider("custom-openai", sample_profile(auth={"type": "none"}))
+        self.assertEqual(service.show_provider("custom-openai")["authType"], "bearer")
+
     def test_update_preserves_secret_fingerprint_headers_and_parameters(self) -> None:
         service = self.service()
         service.add_provider(sample_profile(enabled=False))

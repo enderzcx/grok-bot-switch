@@ -137,10 +137,17 @@
   }
 
   function joinPreview(baseUrl, protocol, overridePath) {
-    var path = (overridePath || "").trim() || DEFAULT_PATHS[protocol] || "";
-    var base = (baseUrl || "").trim().replace(/\/$/, "");
+    var override = (overridePath || "").trim();
+    var base = (baseUrl || "").trim();
     if (!base) return "填写根地址后显示";
-    return "POST " + base + path;
+    try {
+      var url = new URL(base);
+      if (url.username || url.password || url.hash || !/^https?:$/.test(url.protocol)) return "请填写有效的根地址";
+      url.pathname = override || url.pathname.replace(/\/+$/, "") + (DEFAULT_PATHS[protocol] || "");
+      return "POST " + url.href;
+    } catch (_error) {
+      return "请填写有效的根地址";
+    }
   }
 
   function routeKind(status) {
