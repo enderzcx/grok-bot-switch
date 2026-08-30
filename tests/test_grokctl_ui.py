@@ -8,6 +8,7 @@ import os
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -146,6 +147,16 @@ class UiTest(unittest.TestCase):
         httpd = self.panel._httpd
         assert httpd is not None
         self.assertEqual(httpd.server_address[0], "127.0.0.1")
+
+    def test_native_connect_and_progress_keep_csrf_and_fixed_body_guards(self):
+        for route, method in (("connect", "connect_native"), ("progress", "native_progress")):
+            with self.subTest(route=route), patch.object(self.service, method, return_value={"ok": True}) as operation:
+                self.assertEqual(self.json("POST", "/api/" + route, {}, csrf=False)[0], 403)
+                operation.assert_not_called()
+                self.assertEqual(self.json("POST", "/api/" + route, {"command": "anything"})[0], 400)
+                operation.assert_not_called()
+                self.assertEqual(self.json("POST", "/api/" + route, {})[0], 200)
+                operation.assert_called_once_with()
 
     def test_rejects_non_loopback_bind(self) -> None:
         with self.assertRaises(ValidationError):

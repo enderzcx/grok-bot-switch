@@ -71,9 +71,19 @@ const activationResult = (result: ActionResult): Activation | null =>
         generation: result.generation,
       }
     : null;
-const activationError = (job: Activation) =>
-  (typeof job.error === "string" ? job.error : job.error?.message) ||
-  "尚未确认切换结果，请继续检查。";
+const activationError = (job: Activation) => {
+  const reason = typeof job.error === "string" ? job.error : job.error?.message;
+  if (!reason) return "尚未确认切换结果，请继续检查。";
+  if (/^[a-z-]+$/.test(reason)) {
+    if (reason === "recovery-waiting-idle")
+      return "Grok Bot 正在工作，等待空闲后再检查恢复结果。";
+    if (reason === "foreign-command-pending")
+      return "Grok Bot 正在处理另一项操作，请稍后继续检查。";
+    if (job.status === "failed") return "请刷新运行状态后重试。";
+    return "运行状态需要检查，尚未确认目标通道生效。";
+  }
+  return reason;
+};
 
 function SecretDialog({
   profile,
