@@ -8,10 +8,10 @@ coverage: complete product, runtime, CLI, local control-panel, protocol-adapter,
 not_complete_for: native Gemini generateContent, local-machine-to-cloud tunneling, automatic cost routing, automatic native fallback, per-Bot routing, public distribution, or unattended production rollout
 verification_level: local
 real_smoke_status: requires_approval
-review_status: not_reviewed
+review_status: reviewed_with_findings
 reviewer: Grok independent review with Codex verification
 review_command: fixed diff 0b4c300...3bec3f8, job 20260830-094414-continue-45ac4a67
-review_notes: Grok builders implement isolated slices; Codex owns integration and an independent structural review before promotion.
+review_notes: Independent Grok review returned REPAIR; Codex reproduced findings and owns repair verification. See local evidence record; not a release PASS yet.
 review_owner: Ender
 review_due: 2026-09-06
 execution_backend: collaborator-assisted
@@ -74,7 +74,7 @@ snapshot operation. Do not describe the public action as exact restoration.
 | Decision | Default | Why safe | Signal to revisit |
 |---|---|---|---|
 | Product surface | `grokctl` CLI plus loopback-only local web panel | Cross-platform, dependency-light, scriptable, and packageable into a menu-bar shell later | Repeated daily use proves a native menu-bar wrapper is worth packaging cost |
-| Provider identity | User-defined immutable profile id plus editable display name | Avoids routing by labels or URLs | Need for centrally managed team catalogs |
+| Provider identity | Immutable profile id; editable inactive profile; referenced active/recovery profiles require a new profile | Avoids routing by labels and invalidating recovery digests | Need for centrally managed team catalogs |
 | Protocol selection | Explicit enum; URL inference only suggests and never overrides | Prevents Chat/Responses/Messages ambiguity | A signed provider catalog supplies authoritative protocol metadata |
 | Authentication | `none`, bearer API key, `x-api-key`, or provider-owned OAuth adapter | Covers common APIs without pretending OAuth is generic | A new provider has a materially different refresh or identity contract |
 | Fallback | `never` | Protects quota provenance and prevents hidden native usage | Owner explicitly approves a separately labeled fallback mode |
@@ -250,7 +250,7 @@ failure after restart  -> restore previous transaction snapshot and restart once
 
 The pre-restart failure path never changes active state. The post-restart failure path owns exactly one rollback attempt and then stops with preserved evidence.
 
-Official mode restores the pinned stock bundle, disables external config, removes provisioned runtime secrets for the deactivated profile, stops the hop, and restarts through the same supervisor command protocol.
+Official mode restores the pinned stock bundle, disables external config, stops the hop (including its in-memory credentials), and restarts through the same supervisor command protocol. It does not delete saved operator keys. Only explicit SecretStore operations own key deletion; keys referenced by active or recovery routes cannot be rotated or removed.
 
 ### 5.6 CLI
 
@@ -258,6 +258,7 @@ Official mode restores the pinned stock bundle, disables external config, remove
 grokctl status [--json]
 grokctl providers list [--json]
 grokctl providers add --file PROFILE.json
+grokctl providers update PROFILE --file PROFILE.json
 grokctl providers show PROFILE
 grokctl providers remove PROFILE
 grokctl secret set PROFILE [--stdin]
@@ -266,7 +267,8 @@ grokctl test PROFILE [--live]
 grokctl plan PROFILE|official [--json]
 grokctl use PROFILE|official [--apply]
 grokctl verify [--live]
-grokctl rollback [--apply]
+grokctl switch-back [--apply]
+grokctl rollback [--apply]  # compatibility alias for switch-back
 grokctl activity [--limit N] [--json]
 grokctl ui [--port 0]
 ```
@@ -375,7 +377,7 @@ Rules:
 - Loading: the panel first displays local desired state, then marks observed host state when readback arrives.
 - Empty state: built-in Official card plus “Add provider”; no example key or fake active state.
 - Error states: field-level validation, unreachable host, pending supervisor command, invalid secret permissions, unsupported bundle hash, hop failure, protocol mismatch, incomplete stream, and drift each have separate messages.
-- Undo/recovery: every successful activation retains one previous transaction snapshot; Rollback previews its exact target before `--apply`.
+- Undo/recovery: every successful activation retains one previous transaction snapshot. Switch-back previews its target before `--apply`, validates its provenance, and starts a new transaction with current artifacts; it does not claim exact snapshot restoration. Internal failure recovery restores and verifies the snapshot separately.
 - Keyboard/accessibility: semantic HTML controls, visible focus, Enter saves forms only after validation, Escape closes dialogs, status never relies on color alone.
 - Secret editing: existing secret is shown only as “installed” plus fingerprint; it is never returned to the browser.
 - Cost: every live test labels the selected provider/model and states that it may consume quota before execution.

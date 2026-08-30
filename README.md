@@ -44,6 +44,7 @@ python3 -m grokctl --home runtime/operator-state status --json
 
 - 外部模式所有推理 session 均路由到 loopback hop；失败不自动回落到官方。
 - key 只由 hop 持有；host 配置不含凭据。配置和 secret 分文件、仅当前用户可读写。
+- 当前通道与恢复流程引用中的密钥禁止原地轮换或删除；需要更换时新建通道再切换。切回官方不会删除已保存密钥。
 - HTTPS 外部 URL、明确的请求路径、安全请求头、DNS/IP 检查和禁止重定向共同约束上游；这不是任意 URL 代理。
 - host 补丁仅对已验证的 0.30 bundle hash 与唯一锚点编译；未知版本拒绝。不会自动修改已安装 App。
 - `host configure` 当前只接受 `lab-local-root`，明确显示 `lab-synthetic`；默认禁止模拟 apply。即使测试显式开启模拟 apply，也不会重启真实 Grok Bot。
