@@ -2,11 +2,15 @@
 
 仓库：[`enderzcx/grok-bot-switch`](https://github.com/enderzcx/grok-bot-switch) · CLI：`grokctl` · 状态：本地实验版
 
-一个不绑定供应商的 Grok Bot 通道管理工具：保存任意兼容服务的 URL、模型和 API key，明确选择协议，并在官方通道与外部通道之间规划切换。非 xAI / X 官方项目。
+一个不绑定供应商的 Grok Bot 通道管理工具：保存兼容服务的 URL、模型和 API key，明确选择协议，在官方通道与外部通道之间切换。非 xAI / X 官方项目。
 
-**当前是本地实验版，不是已接入真实主机的成品。** 配置管理、CLI、浏览器面板、三协议适配器和 host 补丁编译器已实现；切换事务目前只连接模拟主机。真实 SSH/云主机执行器、在线验证和供应商 OAuth 适配器尚未实现，不能用模拟 PID、健康状态或测试结果证明生产切换成功。
+产品入口是自动识别本机已安装的 Grok Bot，不要求用户配置 SSH 或 Tailscale。Windows 0.28.0 的可恢复客户端适配、原生连接和切换控制器已通过实机验收；已检查的接口和接入边界见 [本机客户端接入](docs/local-client-integration.md)。
+
+**当前是内部测试版，不是公开发行版。** 已在 Windows 完成官方 → 自定义 API → 官方的真实切换，并从普通 Grok Bot 聊天读回 `GROK_BOT_SWITCH_EXTERNAL_OK`，五条外部请求均与供应商生产回执匹配。此次真实协议为 OpenAI Chat；Responses、Messages 已有本地测试，但未完成相同的实机供应商验收。供应商 OAuth 尚未实现。完整证据和限制见 [原生接入验收记录](docs/native-client-rollout.md)。
 
 ## 使用
+
+Windows 桌面测试包已可构建：解压后双击 `GrokBotSwitch.exe`，不需要安装 Python/Node。原生窗口、真实主机切换与生产验收的完成状态分开记录，见 [Windows 桌面验收](docs/desktop-windows.md)。下方命令用于源码/CLI 使用。
 
 Python 3.10+；运行协议/host 测试另需 Node.js。Python 服务不需要第三方包，React 前端及依赖已打包在仓库内。在仓库目录运行：
 
@@ -14,7 +18,7 @@ Python 3.10+；运行协议/host 测试另需 Node.js。Python 服务不需要�
 python3 -m grokctl --home runtime/operator-state ui
 ```
 
-打开输出的 `http://127.0.0.1:<port>` 地址。面板可以添加供应商、单独安装密钥、显示完整请求端点、检查配置和查看切换计划。按 Ctrl+C 关闭。面板不监听外网，写操作要求会话令牌；密钥写入后不再返回浏览器。
+打开输出的 `http://127.0.0.1:<port>` 地址。面板可以添加供应商、单独安装密钥、显示完整请求端点和检查配置。点击“使用”或“切回上一通道”后自动检查切换条件，通过才执行，不再弹出确认框；失败原因就地显示。删除供应商和移除密钥仍需确认。按 Ctrl+C 关闭。面板不监听外网，写操作要求会话令牌；密钥写入后不再返回浏览器。
 
 CLI 使用相同服务和数据：
 
@@ -45,10 +49,12 @@ python3 -m grokctl --home runtime/operator-state status --json
 ## 安全与真实边界
 
 - 外部模式所有推理 session 均路由到 loopback hop；失败不自动回落到官方。
-- key 只由 hop 持有；host 配置不含凭据。配置和 secret 分文件、仅当前用户可读写。
+- 推理请求由 hop 添加 key；host 的推理配置不含凭据。配置和 secret 分文件、仅当前用户可读写；密钥不会回显给界面。
 - 当前通道与恢复流程引用中的密钥禁止原地轮换或删除；需要更换时新建通道再切换。切回官方不会删除已保存密钥。
 - HTTPS 外部 URL、明确的请求路径、安全请求头、DNS/IP 检查和禁止重定向共同约束上游；这不是任意 URL 代理。
-- host 补丁仅对已验证的 0.30 bundle hash 与唯一锚点编译；未知版本拒绝。不会自动修改已安装 App。
+- host 补丁仅对固定的已知 bundle hash 与唯一锚点编译；未知版本拒绝。首次点击连接会备份并适配已支持的 Windows 安装；运行中的客户端不会被强制关闭。Mac 目前只检测，不修改安装。
+- 切换影响当前云端的所有 Bot。地址和供应商密钥会提交到该云端的私有目录；原有账号凭据留在原生客户端进程内。
+- 切换结果必须经过原生重启回执、新进程身份和健康状态确认。等待中的命令不强制重启；不确定的结果停止后续切换。外部模式暂不支持原生语音转写，不回退官方语音。
 - `host configure` 当前只接受 `lab-local-root`，明确显示 `lab-synthetic`；默认禁止模拟 apply。即使测试显式开启模拟 apply，也不会重启真实 Grok Bot。
 - `switch-back`（兼容别名 `rollback`）校验上一份回执/快照后，按当前 profile 重新发起切换，**不是按历史快照原样恢复**。事务执行失败时的内部恢复另有快照保护。
 - `test --live`、`verify --live` 尚未接入，会明确报错。不宣称原生额度为零，也不宣称任何第三方已完成生产兼容验收。
@@ -82,4 +88,4 @@ python3 -m grokctl --help
 
 [完整实现合同](docs/provider-switcher-v0.1.md)包含产品形态、模块职责、安全边界、验收矩阵和真实上线门槛；[本轮交付记录](docs/provider-switcher-local-evidence.md)记录本地证据及尚未完成项。
 
-后续先实现真实主机适配器与安装/升级流程，再经单独授权进行 `official → custom → official` 的真实 Grok Bot 消息、PID/hash、供应商回执及额度读回。现有 BeefAPI 专用实验代码只作为兼容/回归样本保留，不是通用核心依赖。
+剩余公开发布门槛包括签名/安装器、升级兼容矩阵和更多供应商协议实测。原生用量界面此次前后均为 100%，不能用这个粗粒度读数证明原生扣费精确为零。BeefAPI 仅用于这次验收；专用实验管理脚本不随桌面包发布，不是通用核心依赖。
