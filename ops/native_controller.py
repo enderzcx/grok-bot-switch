@@ -100,7 +100,10 @@ class NativeHost:
         self.supervisor_dir = Path(supervisor_dir)
         self.proc_root = Path(proc_root)
         self.supervisor_source = Path(supervisor_source)
-        self.listener_owner = listener_owner or owns_listener
+        # Native cloud hosts may already bind 0.0.0.0. We still connect only to
+        # loopback and require that exact listener inode to belong to this PID.
+        # Our provider hop retains the stricter loopback-only default.
+        self.listener_owner = listener_owner or (lambda pid, port: owns_listener(pid, port, allow_wildcard=True))
         self.opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
     @property

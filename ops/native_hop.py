@@ -60,7 +60,7 @@ def process_identity(pid: int) -> tuple[int, list[str]]:
     return ticks, [part.decode("utf-8") for part in cmdline.rstrip(b"\0").split(b"\0")]
 
 
-def owns_listener(pid: int, port: int) -> bool:
+def owns_listener(pid: int, port: int, *, allow_wildcard: bool = False) -> bool:
     """A matching HTTP body alone cannot attribute somebody else's listener."""
     inodes = set()
     for fd in (Path("/proc") / str(pid) / "fd").iterdir():
@@ -70,10 +70,13 @@ def owns_listener(pid: int, port: int) -> bool:
             continue
         if target.startswith("socket:[") and target.endswith("]"):
             inodes.add(target[8:-1])
+    addresses = {f"0100007F:{port:04X}"}
+    if allow_wildcard:
+        addresses.add(f"00000000:{port:04X}")
     with (Path("/proc") / str(pid) / "net" / "tcp").open() as stream:
         for line in stream:
             fields = line.split()
-            if len(fields) >= 10 and fields[1] == f"0100007F:{port:04X}" and fields[3] == "0A" and fields[9] in inodes:
+            if len(fields) >= 10 and fields[1] in addresses and fields[3] == "0A" and fields[9] in inodes:
                 return True
     return False
 

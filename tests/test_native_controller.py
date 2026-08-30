@@ -89,7 +89,7 @@ class NativeControllerTests(unittest.TestCase):
     def owns_listener(self, pid, port):
         # Exercise the actual shared parser against a synthetic proc tree.
         with patch.object(native_hop, "Path", side_effect=lambda value: self.proc if str(value) == "/proc" else Path(value)):
-            return native_hop.owns_listener(pid, port)
+            return native_hop.owns_listener(pid, port, allow_wildcard=True)
 
     def status(self, id, kind):
         (self.supervisor / "status.json").write_text(json.dumps({"lastCommandId": id,
@@ -160,7 +160,7 @@ class NativeControllerTests(unittest.TestCase):
         tcp = self.proc / "123" / "net" / "tcp"
         original = tcp.read_text()
         for line in (original.replace("123001", "999999"), original.replace("49C0", "49C1"),
-                     original.replace("0100007F", "00000000"), original.replace(" 0A ", " 01 ")):
+                     original.replace("0100007F", "0100000A"), original.replace(" 0A ", " 01 ")):
             with self.subTest(line=line):
                 tcp.write_text(line)
                 self.opener.calls.clear()
@@ -170,6 +170,16 @@ class NativeControllerTests(unittest.TestCase):
         self.assertTrue(self.native.read_observation()["health"])
         self.opener.on_open = lambda: (self.proc / "123" / "fd" / "5").unlink()
         self.assertFalse(self.native.read_observation()["health"], "ownership loss during HTTP must invalidate its body")
+
+    def test_existing_native_wildcard_listener_is_owned_but_hop_stays_loopback_only(self):
+        tcp = self.proc / "123" / "net" / "tcp"
+        tcp.write_text(tcp.read_text().replace("0100007F", "00000000"))
+        self.assertTrue(self.native.read_observation()["health"])
+        with patch.object(native_hop, "Path", side_effect=lambda value: self.proc if str(value) == "/proc" else Path(value)):
+            self.assertFalse(native_hop.owns_listener(123, 18880))
+            self.assertTrue(native_hop.owns_listener(123, 18880, allow_wildcard=True))
+        tcp.write_text(tcp.read_text().replace("123001", "999999"))
+        self.assertFalse(self.native.read_observation()["health"])
 
     def test_health_requires_a_real_busy_boolean_even_for_receipts(self):
         old = self.native.read_observation()
