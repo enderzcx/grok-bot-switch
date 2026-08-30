@@ -4,8 +4,9 @@
   if (process.platform !== "win32" || pe.app.getVersion() !== "0.28.0") return;
   const path = require("node:path");
   const fs = require("node:fs");
-  const home = process.argv.find(arg => arg.startsWith("--grok-bot-switch-home="))?.split("=").slice(1).join("=");
-  // Opt-in argument is mandatory for this acceptance build.
+  const installedHome = null; // INSTALL_HOME_PLACEHOLDER
+  const home = process.argv.find(arg => arg.startsWith("--grok-bot-switch-home="))?.split("=").slice(1).join("=") || installedHome;
+  // Probe builds require an argument; explicit attachment embeds the home.
   if (!home || !path.isAbsolute(home)) return;
   const bridgeModule = { exports: {} };
   ((module, exports, require) => {
@@ -15,6 +16,7 @@
   const hostPackage = null; // HOST_PACKAGE_PLACEHOLDER
   const hostBridge = hostPackage ? createHostBridge({packageManifest:hostPackage,daemon:controlDaemon}) : null;
   let nativeReady = false;
+  try { nativeReady = !!hostPackage && JSON.parse(fs.readFileSync(path.join(home,'native-ready.json'),'utf8')).packageSha256 === hostPackage.sha256; } catch(_) {}
   const rendererEvents = new Map();
   pe.app.on('web-contents-created', (_event, contents) => {
     const record = {};
@@ -119,7 +121,10 @@
       bootstrapHost: hostBridge ? signal => withBox((box,fence) => hostBridge.bootstrap(box,{signal,fence}),signal) : undefined,
       runHostOperation: hostBridge ? (request,signal) => withBox(async(box,fence) => {
         const result = await hostBridge.operation(box,request,{signal,fence});
-        if(request.action==='setup' && result.ok===true) nativeReady=true;
+        if(result.ok===true || ['pending','verified'].includes(result.status)) {
+          nativeReady=true;
+          fs.writeFileSync(path.join(home,'native-ready.json'),JSON.stringify({packageSha256:hostPackage.sha256}),{mode:0o600});
+        }
         return result;
       },signal) : undefined,
       getNativeState: hostBridge ? signal => nativeReady ? withBox((box,fence) => hostBridge.operation(box,{action:'inspect'},{signal,fence}),signal) : null : undefined,

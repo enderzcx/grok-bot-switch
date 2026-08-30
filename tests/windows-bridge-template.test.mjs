@@ -12,6 +12,7 @@ const source = fs.readFileSync(sourcePath, "utf8");
 const mockModule = `module.exports = {
   startBridge: options => __test.startBridge(options),
   probeExecutor: (...args) => __test.probeExecutor(...args),
+  createHostBridge: () => ({operation: (...args) => __test.hostOperation(...args)}),
 };`;
 assert.equal([...source.matchAll(/^\s*__BRIDGE_MODULE__\s*$/gm)].length, 1, "exactly one module insertion point is required");
 const executable = source.replace(/^\s*__BRIDGE_MODULE__\s*$/m, mockModule);
@@ -55,7 +56,7 @@ async function harness(options = {}) {
     process: { platform: options.platform ?? "win32", argv: options.argv ?? ["Grok Bot.exe", "--grok-bot-switch-home=C:\\synthetic=home"] },
     require(name) {
       if (name === "node:path") return path.win32;
-      if (name === "node:fs") return { writeFileSync: (...args) => calls.writes.push(args) };
+      if (name === "node:fs") return { writeFileSync: (...args) => calls.writes.push(args), readFileSync: () => { throw new Error('absent'); } };
       throw new Error(`Unexpected module request: ${name}`);
     },
     pe: { app: {
@@ -75,6 +76,10 @@ async function harness(options = {}) {
     FDt: false,
     fetch: () => { throw new Error("Real fetch is forbidden in this test"); },
     __test: {
+      async hostOperation(box, request) {
+        if (options.operationFailure) throw new Error('synthetic failure');
+        return request.action === 'inspect' ? {ok:true,runtimeKind:'native-host'} : (options.operationResult || {ok:true});
+      },
       async startBridge(value) {
         calls.start += 1;
         if (options.startFailure) throw options.startFailure;
@@ -87,7 +92,8 @@ async function harness(options = {}) {
       },
     },
   });
-  vm.runInContext(executable, context, { filename: sourcePath, timeout: 1000 });
+  const script = options.managed ? executable.replace('const hostPackage = null; // HOST_PACKAGE_PLACEHOLDER', 'const hostPackage = {sha256:"synthetic-package"};') : executable;
+  vm.runInContext(script, context, { filename: sourcePath, timeout: 1000 });
   await tick();
   function connector(result = "connected") {
     const instance = new Connector();
@@ -108,6 +114,26 @@ async function waitFor(predicate) {
   }
   assert.fail("Synthetic dispatch did not reach the expected stage");
 }
+
+test('successful managed operations enable fresh native readback without setup-only latch', async () => {
+  for (const result of [{ok:true}, {status:'pending'}, {status:'verified'}]) {
+    const h = await harness({managed:true, operationResult:result});
+    await h.connector().connect();
+    assert.equal(await h.callbacks.getNativeState(), null);
+    await h.callbacks.runHostOperation({action:'begin'});
+    assert.equal((await h.callbacks.getNativeState()).runtimeKind, 'native-host');
+    assert.equal(h.calls.writes.length, 1);
+    assert.ok(!JSON.stringify(h.calls.writes).includes('private-'));
+  }
+});
+
+test('failed managed operations never enable native readiness', async () => {
+  const h = await harness({managed:true, operationFailure:true});
+  await h.connector().connect();
+  await assert.rejects(h.callbacks.runHostOperation({action:'begin'}));
+  assert.equal(await h.callbacks.getNativeState(), null);
+  assert.equal(h.calls.writes.length, 0);
+});
 
 test("only Windows 0.28.0 with an explicit absolute home opts in", async t => {
   for (const options of [

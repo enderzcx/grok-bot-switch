@@ -115,9 +115,10 @@ def inspect(host: NativeHost) -> dict:
         blocking.append("pending-command")
     if job and job.get("status") not in ("verified", "failed"):
         blocking.append("activation-in-progress")
-    return {"ok": True, "providerSwitchReady": not any(code in blocking for code in ("unsupported-supervisor", "host-unreachable", "unknown-host-state")),
+    return {"ok": True, "providerSwitchReady": not blocking,
             "runtimeKind": "native-host", "activeProfile": current,
             "desiredProfile": (job or {}).get("target") or current or "official",
+            "previousProfile": ((job or {}).get("previousActive") or {}).get("target", "official") if job and job.get("status") == "verified" else None,
             "profileDigest": (active or {}).get("profileDigest"), "blocking": blocking,
             "observation": observation,
             "activation": {key: job.get(key) for key in ("id", "status", "phase", "error", "target", "generation")} if job else None}

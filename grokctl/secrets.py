@@ -187,6 +187,28 @@ class SecretStore:
             raise SecretError("官方通道不使用密钥")
         return self.root / "profile" / profile_id
 
+    def transfer(self, profile_id: str, send):
+        """Deliver a validated value to an internal transport, never a UI result."""
+        path = self.path_for(profile_id)
+        fd = None
+        data = b""
+        try:
+            fd = open_nofollow(path, os.O_RDONLY)
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or not private_permissions(path, info, fd=fd):
+                raise SecretError("密钥文件不安全")
+            data, reason = _read_complete(fd, info.st_size)
+            if reason:
+                raise SecretError("密钥文件不安全")
+            validate_secret_bytes(data)
+            return send(data.decode("utf-8"))
+        except (OSError, UnicodeError):
+            raise SecretError("无法读取密钥") from None
+        finally:
+            data = b""
+            if fd is not None:
+                os.close(fd)
+
     def set_from_stream(self, profile_id: str, stream: BinaryIO) -> SecretStatus:
         payload = _read_stream_bounded(stream)
         validate_secret_bytes(payload)

@@ -392,6 +392,14 @@ class PanelHandler(BaseHTTPRequestHandler):
         raise NotFoundError("未找到")
 
     def _handle_post(self, path: str, body: dict[str, Any]) -> object:
+        if path == "/api/connect":
+            if body:
+                raise ValidationError("连接不接受额外参数")
+            return self.panel.service.connect_native()
+        if path == "/api/progress":
+            if body:
+                raise ValidationError("进度查询不接受额外参数")
+            return self.panel.service.native_progress()
         if path == "/api/providers":
             return self.panel.service.add_provider(body)
         if path == "/api/plan":

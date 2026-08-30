@@ -59,6 +59,7 @@ class NativeRunnerTests(unittest.TestCase):
         result = runner.inspect(self.host)
         self.assertIsNone(result["activeProfile"])
         self.assertIn("active-state-drift", result["blocking"])
+        self.assertFalse(result["providerSwitchReady"])
         self.assertNotIn("SENTINEL", json.dumps(result))
 
     def test_pending_status_does_not_advance_or_touch_journal(self):
@@ -68,8 +69,19 @@ class NativeRunnerTests(unittest.TestCase):
         result = runner.inspect(self.host)
         self.assertEqual(result["desiredProfile"], "custom")
         self.assertIn("activation-in-progress", result["blocking"])
+        self.assertFalse(result["providerSwitchReady"])
         self.assertNotIn("SENTINEL", json.dumps(result))
         self.assertEqual(before, (job.read_bytes(), job.stat().st_mtime_ns))
+
+    def test_busy_or_pending_command_is_not_switch_ready(self):
+        for field, value in (("isBusy", True), ("pendingCommand", {"id": "other"})):
+            with self.subTest(field=field):
+                previous = self.observation[field]
+                self.observation[field] = value
+                result = runner.inspect(self.host)
+                self.assertFalse(result["providerSwitchReady"])
+                self.assertEqual(result["activeProfile"], "official")
+                self.observation[field] = previous
 
 
 if __name__ == "__main__":

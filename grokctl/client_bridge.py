@@ -18,12 +18,19 @@ MARKER = "grok-bot-switch-client-bridge-v1"
 MAX_MANIFEST_BYTES = 8 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024
 TIMEOUT_SECONDS = 15
+OPERATION_TIMEOUT_SECONDS = 35
 _VERSION = re.compile(r"[0-9]{1,4}(?:\.[0-9]{1,6}){1,3}(?:[-+][A-Za-z0-9.-]{1,40})?")
 _EXECUTOR_REASONS = {"not-provided", "unsupported-address", "ping-rejected", "ping-failed", "host-not-ready"}
 
 
 class _Invalid(ValueError):
     pass
+
+
+class ClientBridgeError(RuntimeError):
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -113,7 +120,55 @@ def _manifest(home: Path, installed_executable) -> dict:
         if not os.path.isabs(expected) or os.path.normcase(os.path.normpath(expected)) != os.path.normcase(os.path.normpath(executable)):
             raise _Invalid()
     _version(data.get("clientVersion"), token)
+    if data.get("mode", "probe") not in ("probe", "native-switch"):
+        raise _Invalid()
     return data
+
+
+def _profile_id(value):
+    return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,62}", value) else None
+
+
+def _digest(value):
+    return value if isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value) else None
+
+
+def _runtime(data):
+    if not isinstance(data, dict) or data.get("ok") is not True or data.get("runtimeKind") != "native-host":
+        return None
+    blocks = data.get("blocking")
+    if not isinstance(blocks, list) or len(blocks) > 32 or any(not isinstance(v, str) or not re.fullmatch(r"[a-z-]{1,64}", v) for v in blocks):
+        raise _Invalid()
+    result = {"runtimeKind": "native-host", "activeProfile": _profile_id(data.get("activeProfile")),
+              "desiredProfile": _profile_id(data.get("desiredProfile")), "profileDigest": _digest(data.get("profileDigest")),
+              "previousProfile": _profile_id(data.get("previousProfile")),
+              "blocking": blocks, "providerSwitchReady": data.get("providerSwitchReady") is True}
+    activation = data.get("activation")
+    if isinstance(activation, dict):
+        result["activation"] = _action_result(activation)
+    return result
+
+
+def _action_result(data):
+    if not isinstance(data, dict):
+        raise _Invalid()
+    out = {}
+    for key in ("ok", "verified", "providerSwitchReady"):
+        if type(data.get(key)) is bool:
+            out[key] = data[key]
+    for key in ("id", "status", "phase", "error", "mode"):
+        value = data.get(key)
+        if value is None or isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_.-]{1,100}", value):
+            out[key] = value
+    for key in ("target",):
+        if data.get(key) is not None:
+            out[key] = _profile_id(data[key])
+    for key in ("packageSha256", "stockSha256", "patchedSha256", "profileDigest", "hostBundleSha256"):
+        if data.get(key) is not None:
+            out[key] = _digest(data[key])
+    if type(data.get("generation")) is int and data["generation"] > 0:
+        out["generation"] = data["generation"]
+    return out
 
 
 def _sanitize(data: dict, manifest: dict) -> dict[str, object]:
@@ -131,15 +186,22 @@ def _sanitize(data: dict, manifest: dict) -> dict[str, object]:
     if data["clientVersion"] != manifest.get("clientVersion"):
         raise _Invalid()
     token = manifest["token"]
+    mode = data.get("mode", "probe")
+    if mode != manifest.get("mode", "probe"):
+        raise _Invalid()
+    runtime = _runtime(data.get("runtime")) if mode == "native-switch" else None
     result = {"connected": True, "service": MARKER, "schemaVersion": 1,
               "clientConnected": data["clientConnected"], "hostReachable": data["hostReachable"],
               "clientVersion": _version(data["clientVersion"], token),
               "hostVersion": _version(data.get("hostVersion"), token, host=True),
-              "hostBusy": data.get("hostBusy"), "providerSwitchReady": False, "reason": None}
+              "hostBusy": data.get("hostBusy"), "mode": mode, "runtime": runtime,
+              "providerSwitchReady": mode == "native-switch" and runtime is not None and runtime["providerSwitchReady"], "reason": None}
     executor = data.get("executor")
     if isinstance(executor, dict) and all(type(executor.get(k)) is bool for k in ("available", "reachable")):
         result["executor"] = {"available": executor["available"], "reachable": executor["reachable"],
                               "reason": executor.get("reason") if executor.get("reason") in _EXECUTOR_REASONS else None}
+    if token in json.dumps(result):
+        raise _Invalid()
     return result
 
 
@@ -160,7 +222,7 @@ def status(home: Path, installed_executable: Path | str | None = None) -> dict[s
                                      headers={"Authorization": "Bearer " + manifest["token"], "Accept": "application/json"}, method="GET")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     try:
-        with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
+        with opener.open(request, timeout=OPERATION_TIMEOUT_SECONDS if manifest.get("mode") == "native-switch" else TIMEOUT_SECONDS) as response:
             if response.status != 200 or response.geturl() != request.full_url:
                 return _disconnected("probe-rejected")
             raw = response.read(MAX_RESPONSE_BYTES + 1)
@@ -174,3 +236,63 @@ def status(home: Path, installed_executable: Path | str | None = None) -> dict[s
         return _disconnected("bridge-unreachable")
     except (ValueError, TypeError, RecursionError):
         return _disconnected("invalid-response")
+
+
+def call(home: Path, action: str, *, profile=None, secret=None, installed_executable=None) -> dict:
+    """User-requested, fixed native operation; never forwards arbitrary commands."""
+    if action not in ("bootstrap", "inspect", "setup", "plan", "begin", "progress"):
+        raise ClientBridgeError("unsupported-operation")
+    try:
+        manifest = _manifest(Path(home), installed_executable)
+    except Exception:
+        raise ClientBridgeError("invalid-pairing") from None
+    if manifest.get("mode") != "native-switch":
+        raise ClientBridgeError("probe-only")
+    payload = {} if action == "bootstrap" else {"action": action}
+    if profile is not None:
+        if action not in ("plan", "begin"):
+            raise ClientBridgeError("invalid-operation")
+        payload["profile"] = profile
+    if secret is not None:
+        if action != "begin" or not isinstance(secret, str):
+            raise ClientBridgeError("invalid-operation")
+        payload["secret"] = secret
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    if len(body) > 65536:
+        raise ClientBridgeError("request-too-large")
+    route = "bootstrap" if action == "bootstrap" else "operation"
+    request = urllib.request.Request(f"http://127.0.0.1:{manifest['port']}/v1/{route}", data=body,
+        headers={"Authorization": "Bearer " + manifest["token"], "Content-Type": "application/json"}, method="POST")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    try:
+        with opener.open(request, timeout=OPERATION_TIMEOUT_SECONDS) as response:
+            if response.status != 200 or response.geturl() != request.full_url:
+                raise _Invalid()
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES or manifest["token"].encode() in raw:
+                raise _Invalid()
+            if secret and len(secret) >= 8 and secret.encode() in raw:
+                raise _Invalid()
+        data = _object(raw)
+        result = _runtime(data) if action == "inspect" else _action_result(data)
+        if result is None:
+            raise _Invalid()
+        if data.get("ok") is False:
+            raise ClientBridgeError("native-operation-failed")
+        if action == "bootstrap" and not (result.get("ok") is True and result.get("packageSha256")):
+            raise _Invalid()
+        if action == "setup" and not (result.get("ok") is True and result.get("stockSha256") and result.get("patchedSha256")):
+            raise _Invalid()
+        if action == "plan" and not (result.get("status") == "planned" and result.get("target") and result.get("verified") is False):
+            raise _Invalid()
+        if action in ("begin", "progress") and (result.get("status") not in ("idle", "pending", "verified", "failed", "needs-attention") or type(result.get("verified")) is not bool or (result["status"] == "verified") != result["verified"]):
+            raise _Invalid()
+        return result
+    except ClientBridgeError:
+        raise
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise ClientBridgeError("probe-busy" if error.code == 409 else "native-operation-unconfirmed") from None
+    except Exception:
+        # No automatic retry of begin: the remote journal may already exist.
+        raise ClientBridgeError("native-operation-unconfirmed") from None

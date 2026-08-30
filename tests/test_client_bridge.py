@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from grokctl.client_bridge import MARKER, MAX_MANIFEST_BYTES, MAX_RESPONSE_BYTES, status
+from grokctl.client_bridge import MARKER, MAX_MANIFEST_BYTES, MAX_RESPONSE_BYTES, status, call, ClientBridgeError
 from grokctl.profiles import atomic_replace, ensure_private_dir
 
 
@@ -23,6 +23,7 @@ class ClientBridgeTests(unittest.TestCase):
         self.instance = str(uuid.uuid4())
         self.executable = str(self.home / "Grok Bot.exe")
         self.requests = []
+        self.posts = []
         self.http_status = 200
         self.location = None
         self.body = {
@@ -36,6 +37,10 @@ class ClientBridgeTests(unittest.TestCase):
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                owner.posts.append(json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0")))))
+                self.do_GET()
+
             def do_GET(self):
                 owner.requests.append((self.path, dict(self.headers)))
                 payload = owner.body if isinstance(owner.body, bytes) else json.dumps(owner.body).encode()
@@ -102,6 +107,47 @@ class ClientBridgeTests(unittest.TestCase):
 
     def test_response_client_version_must_match_pairing(self):
         self.body["clientVersion"] = "0.28.0"
+        self.assertEqual(status(self.home)["reason"], "invalid-response")
+
+    def test_probe_mode_cannot_invoke_mutation_routes(self):
+        with self.assertRaises(ClientBridgeError) as error:
+            call(self.home, "bootstrap")
+        self.assertEqual(error.exception.code, "probe-only")
+        self.assertEqual(self.requests, [])
+
+    def test_native_begin_uses_one_post_and_returns_no_key(self):
+        self.manifest["mode"] = "native-switch"
+        self.save_manifest()
+        self.body = {"id":"gbs-"+str(uuid.uuid4()),"status":"pending","verified":False,"target":"custom"}
+        key = "SENTINEL_SUPPLIER_KEY"
+        result = call(self.home, "begin", profile={"id":"custom"}, secret=key)
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.posts[0]["secret"], key)
+        self.assertFalse(result["verified"])
+        self.assertNotIn(key, json.dumps(result))
+
+    def test_false_verified_or_key_echo_is_rejected_without_retry(self):
+        self.manifest["mode"] = "native-switch"
+        self.save_manifest()
+        for body in ({"status":"verified","verified":False}, {"status":"pending","verified":False,"extra":"SENTINEL_SUPPLIER_KEY"}):
+            before = len(self.posts)
+            self.body = body
+            with self.assertRaises(ClientBridgeError):
+                call(self.home, "begin", profile={"id":"custom"}, secret="SENTINEL_SUPPLIER_KEY")
+            self.assertEqual(len(self.posts), before + 1)
+
+    def test_managed_runtime_requires_matching_mode_and_sanitizes_nested_state(self):
+        self.manifest["mode"] = "native-switch"
+        self.save_manifest()
+        self.body["mode"] = "native-switch"
+        self.body["runtime"] = {"ok":True,"runtimeKind":"native-host","providerSwitchReady":True,
+                                "activeProfile":"custom","desiredProfile":"custom","profileDigest":"f"*64,
+                                "previousProfile":"official","blocking":[],"secret":"SENTINEL"}
+        result = status(self.home)
+        self.assertTrue(result["providerSwitchReady"])
+        self.assertEqual(result["runtime"]["activeProfile"], "custom")
+        self.assertNotIn("SENTINEL", json.dumps(result))
+        self.body["runtime"]["profileDigest"] = self.token
         self.assertEqual(status(self.home)["reason"], "invalid-response")
 
     def test_executable_mismatch_prevents_request(self):

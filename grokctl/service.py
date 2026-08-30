@@ -78,6 +78,26 @@ class GrokctlService:
         self.activity_path = self.home / "activity.jsonl"
         self._lock = ExclusiveLock(self.home)
 
+    def _native(self):
+        from grokctl.native_client_service import NativeClientService
+        native = NativeClientService(self)
+        return native if native.configured() else None
+
+    def _references(self, runtime):
+        native = self._native()
+        return referenced_profile_ids(runtime) | (native.references() if native else set())
+
+    def connect_native(self):
+        from grokctl.native_client_service import NativeClientService
+        with self._lock.holding():
+            return NativeClientService(self).connect()
+
+    def native_progress(self):
+        native = self._native()
+        if native is None:
+            raise NotWiredError("请先连接 Grok Bot。")
+        return native.progress()
+
     def _secret_for(self, profile: ProviderProfile) -> SecretStatus:
         return self.secrets.status(profile.id, required=profile.requires_secret())
 
@@ -141,6 +161,7 @@ class GrokctlService:
         return payload
 
     def status(self) -> dict[str, object]:
+        from grokctl.installation import discover_installation
         profiles = self.registry.list_profiles()
         installed = 0
         for profile in profiles:
@@ -148,13 +169,22 @@ class GrokctlService:
             if secret.installed:
                 installed += 1
         config, runtime = self._host()
-        return status_from_host(
+        result = status_from_host(
             home=self.home,
             config=config,
             runtime=runtime,
             providers=len(profiles),
             secrets_installed=installed,
         )
+        result["installation"] = discover_installation()
+        native = self._native()
+        if native is not None:
+            client = native.client_status()
+            result["client"] = client
+            projection = native.projection(client)
+            if projection is not None:
+                result.update(projection)
+        return result
 
     def list_providers(self) -> dict[str, object]:
         providers = [
@@ -179,7 +209,7 @@ class GrokctlService:
             if existing.id == OFFICIAL_ID or existing.built_in or existing.mode == "official":
                 raise ConflictError("官方通道不能修改")
             _config, runtime = self._host()
-            if existing.id in referenced_profile_ids(runtime):
+            if existing.id in self._references(runtime):
                 raise ConflictError("该提供方正在使用，不能修改。请新建提供方。")
             incoming = parse_profile(raw, allow_official=False)
             if incoming.id != existing.id:
@@ -195,7 +225,7 @@ class GrokctlService:
         with self._lock.holding():
             profile = self.registry.get(profile_id)
             _config, runtime = self._host()
-            if profile.id in referenced_profile_ids(runtime):
+            if profile.id in self._references(runtime):
                 raise ConflictError("该提供方正在使用，不能删除")
             tombstone = None
             if profile.id != OFFICIAL_ID:
@@ -241,7 +271,7 @@ class GrokctlService:
 
     def _assert_secret_not_in_use(self, profile_id: str) -> None:
         _config, runtime = self._host()
-        if profile_id in referenced_profile_ids(runtime):
+        if profile_id in self._references(runtime):
             raise ConflictError("该通道正在使用或用于恢复，不能修改密钥；请创建新通道后切换")
 
     def test_profile(self, profile_id: str, *, live: bool = False) -> dict[str, object]:
@@ -346,6 +376,9 @@ class GrokctlService:
         return payload
 
     def plan(self, target: str) -> dict[str, object]:
+        native = self._native()
+        if native is not None:
+            return native.plan(target)
         profile = self._profile(target)
         secret = self._secret_for(profile)
         config, runtime = self._host()
@@ -390,6 +423,9 @@ class GrokctlService:
             return self._apply_use_locked(target)
 
     def _apply_use_locked(self, target: str) -> dict[str, object]:
+        native = self._native()
+        if native is not None:
+            return native.use(target)
         profile = self._profile(target)
         secret = self._secret_for(profile)
         config, runtime = self._host()
@@ -504,6 +540,9 @@ class GrokctlService:
         return self._switch_back_locked(apply=False)
 
     def _switch_back_locked(self, *, apply: bool) -> dict[str, object]:
+        native = self._native()
+        if native is not None:
+            return native.switch_back(apply=apply)
         config, runtime = self._host()
         if config is None or runtime is None:
             payload = {

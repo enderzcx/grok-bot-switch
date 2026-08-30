@@ -130,7 +130,14 @@ async function startBridge({ home, clientVersion, getHostStatus, getExecutorStat
       let status;
       try { status = await bounded(getHostStatus); } catch (_) { status = null; }
       const fields = status && typeof status === "object" ? Object.keys(status).filter(k => /^[a-zA-Z0-9_]{1,80}$/.test(k)).slice(0, 64) : [];
-      const runtime = enabled.mode === "native-switch" && getNativeState ? await bounded(getNativeState, 30000) : null;
+      let runtime = null;
+      try {
+        runtime = enabled.mode === "native-switch" && getNativeState ? await bounded(getNativeState, 30000) : null;
+      } catch (_) {
+        // A host readback failure is not a disconnected desktop client, and
+        // must never preserve an earlier ready or active-provider claim.
+        runtime = {ok:false, providerSwitchReady:false, error:'native-state-unavailable'};
+      }
       send(200, { service: MARKER, schemaVersion: 1, instance, clientVersion: safeVersion(clientVersion),
         mode: enabled.mode,
         clientConnected: true, hostReachable: status !== null,

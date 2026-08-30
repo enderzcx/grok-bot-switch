@@ -32,6 +32,21 @@ test("executor ping keeps auth in request, refuses redirects and does not return
   assert.equal(result.reachable, true);
   assert.ok(!JSON.stringify(result).includes("secret"));
 });
+test('native readback failure does not claim ready or disconnect the desktop', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'grok-bridge-'));
+  await writeFile(path.join(home, 'bridge-enabled.json'), JSON.stringify({schemaVersion:1,mode:'native-switch'}));
+  const server = await bridge.startBridge({home,clientVersion:'0.28.0',getHostStatus:()=>({isBusy:false}),getNativeState:()=>{throw new Error('SENTINEL_PRIVATE');}});
+  try {
+    const manifest = JSON.parse(await readFile(path.join(home,'client-bridge.json')));
+    const response = await fetch(`http://127.0.0.1:${manifest.port}/v1/status`, {headers:{Authorization:'Bearer '+manifest.token}});
+    assert.equal(response.status,200);
+    const result = await response.json();
+    assert.equal(result.clientConnected,true);
+    assert.equal(result.providerSwitchReady,false);
+    assert.equal(result.runtime.ok,false);
+    assert.ok(!JSON.stringify(result).includes('SENTINEL'));
+  } finally { await server.close(); await rm(home,{recursive:true}); }
+});
 test("an empty proxy response is not an executor receipt", async () => {
   const box = { execDaemonUrl: "https://executor.example", execDaemonAuthToken: "secret" };
   for (const response of [new Response(null), new Response(null, { status: 204 }), new Response("x", { headers: { "content-type": "application/proto" } })]) {
