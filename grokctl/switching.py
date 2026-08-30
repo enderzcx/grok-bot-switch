@@ -605,6 +605,8 @@ class SwitchEngine:
 
     def _assert_plan_matches_world(self, plan: ActivationPlan) -> None:
         observed = self.host.observe()
+        if observed.hop_pid is not None and not self.host.processes.owns_pid(observed.hop_pid, self.host.layout.hop_cmdline_token):
+            raise SwitchError("hop pid is not owned by this runtime", "pid_ownership")
         if observed.generation != plan.previous_snapshot.generation:
             raise SwitchError("host generation changed since plan", "snapshot_mismatch")
         if observed.profile_id != plan.previous_profile:
@@ -695,12 +697,8 @@ class SwitchEngine:
         if plan.target_kind == "official":
             if self.host.layout.config_path.is_file():
                 self.host.disable_config()
-            if plan.previous_profile != OFFICIAL_ID:
-                previous = self.catalog.get(plan.previous_profile)
-                auth = previous.get("auth") or {}
-                secret_ref = auth.get("secretRef") if isinstance(auth, dict) else None
-                if secret_ref:
-                    self.host.remove_secret(str(secret_ref))
+            # Switching owns active routing, not stored operator credentials.
+            # Only explicit SecretStore operations remove a saved key.
             if self.host.read_hop_pid() is not None:
                 self.host.stop_hop_if_owner(self.host.layout.hop_cmdline_token)
             if self.host.layout.hop_config_path.exists():
@@ -749,6 +747,18 @@ class SwitchEngine:
             raise SwitchError("restored profile does not match snapshot", "rollback_failed")
         if int(observed.generation) != int(snap.generation):
             raise SwitchError("restored generation does not match snapshot", "rollback_failed")
+        config_digest = sha256_file(self.host.layout.config_path) if self.host.layout.config_path.is_file() else None
+        if config_digest != snap.config_digest:
+            raise SwitchError("restored configuration does not match snapshot", "rollback_failed")
+        if snap.hop_health == "healthy":
+            if observed.hop_pid is None or observed.hop_health != "healthy":
+                raise SwitchError("restored hop is not healthy", "rollback_failed")
+            config = json.loads(self.host.layout.hop_config_path.read_text(encoding="utf-8"))
+            health = self.host.hop_health(observed.hop_pid, config)
+            if health.get("ok") is not True or health.get("profileId") != snap.profile_id:
+                raise SwitchError("restored hop route does not match snapshot", "rollback_failed")
+        elif observed.hop_pid is not None:
+            raise SwitchError("restored official mode still has a hop", "rollback_failed")
 
     def _cleanup_pre_restart(
         self,
@@ -817,6 +827,8 @@ class SwitchEngine:
             evidence["rollbackCommandId"] = rollback_id
             evidence["rollbackPid"] = new_pid
             evidence["rollbackStartedAt"] = started_at
+            self._assert_restored(plan)
+            evidence["restoreProven"] = True
         except Exception as exc:
             wrapped = _wrap(exc)
             raise SwitchError(

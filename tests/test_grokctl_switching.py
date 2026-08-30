@@ -192,7 +192,7 @@ class SwitchTransactionTests(unittest.TestCase):
         self.assertEqual(self._active_bundle(), self.stock_digest)
         self.assertFalse(self.layout.config_path.exists())
         self.assertTrue(Path(str(self.layout.config_path) + ".disabled").is_file())
-        self.assertFalse(self._secret_exists("profile/custom-openai"))
+        self.assertTrue(self._secret_exists("profile/custom-openai"))
         self.assertTrue(self._secret_exists("profile/other-profile"))
         self.assertIsNone(self.runtime.read_hop_pid())
         self.assertEqual(self.runtime.load_state()["activeProfile"], "official")
@@ -305,7 +305,22 @@ class SwitchTransactionTests(unittest.TestCase):
         self.assertEqual(self.runtime.load_state()["activeProfile"], "official")
         self.assertIsNone(self.runtime.pending_command())
         self.assertIn("rollbackCommandId", ctx.exception.evidence)
+        self.assertTrue(ctx.exception.evidence["restoreProven"])
         self.assertNotEqual(self.runtime.processes.host_pid, plan.observed_pid)
+
+    def test_post_restart_restore_is_read_back_before_claiming_success(self) -> None:
+        original_restore = self.runtime.restore_snapshot
+
+        def corrupt_restore(snapshot):
+            original_restore(snapshot)
+            self.layout.bundle_path.write_bytes(b"corrupt-restored-bundle")
+
+        self.runtime.restore_snapshot = corrupt_restore
+        self.runtime.supervisor.fail_next_wait = 1
+        with self.assertRaises(SwitchError) as ctx:
+            self.engine.execute("custom-openai", apply=True)
+        self.assertEqual(ctx.exception.code, "rollback_failed")
+        self.assertNotIn("restoreProven", ctx.exception.evidence)
 
     def test_missing_receipt_rolls_back(self) -> None:
         plan = self.engine.plan("custom-openai")
@@ -343,16 +358,16 @@ class SwitchTransactionTests(unittest.TestCase):
         self.assertEqual(self.runtime.processes.cmdline_of(9999), "/usr/bin/sshd")
         self.assertEqual(self._active_bundle(), self.stock_digest)
 
-    def test_secret_removal_is_scoped_to_deactivated_profile(self) -> None:
+    def test_switching_does_not_delete_stored_operator_secrets(self) -> None:
         self.engine.apply(self.engine.plan("custom-openai"), apply=True)
         self.assertTrue(self._secret_exists("profile/custom-openai"))
         self.assertTrue(self._secret_exists("profile/other-profile"))
         self.engine.apply(self.engine.plan("official"), apply=True)
-        self.assertFalse(self._secret_exists("profile/custom-openai"))
+        self.assertTrue(self._secret_exists("profile/custom-openai"))
         self.assertTrue(self._secret_exists("profile/other-profile"))
         leftover = list(self.layout.secrets_dir.rglob("*"))
         names = [str(path.relative_to(self.layout.secrets_dir)) for path in leftover if path.is_file()]
-        self.assertEqual(names, ["profile/other-profile"])
+        self.assertEqual(sorted(names), ["profile/custom-openai", "profile/other-profile"])
 
     def test_invalid_secret_permissions_do_not_apply(self) -> None:
         self.engine.apply(self.engine.plan("custom-openai"), apply=True)
