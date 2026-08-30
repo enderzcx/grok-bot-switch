@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+import time
 import uuid
 
 from grokctl.models import parse_profile, canonical_dumps
@@ -27,6 +28,7 @@ KNOWN_STOCK_SHA256 = frozenset({
     "3c3f986e614aaf8fbec642269da40dd20f1dbd9912bdf8f2390bafd61ec684ef",
 })
 HANDLE_KEYS = ("pid", "port", "generation", "profileDigest", "configPath", "configDigest", "startedTicks")
+RESTART_GRACE_MS = 60_000
 
 
 class ActivationError(RuntimeError):
@@ -188,11 +190,13 @@ class NativeActivation:
         active, job = _json(self.active_path), _json(self.job_path)
         if job and job.get("status") not in ("verified", "failed"):
             raise ActivationError("activation-in-progress")
-        if active and (active.get("verified") is not True or current["hostBundleSha256"] != active.get("hostBundleSha256")
+        if active is not None and (active.get("verified") is not True or current["hostBundleSha256"] != active.get("hostBundleSha256")
                        or _digest(self.config) != active.get("configDigest")):
             raise ActivationError("active-state-drift")
         if active is None and current["hostBundleSha256"] != self.stock_sha:
             raise ActivationError("unmanaged-patched-host")
+        if active is None and os.path.lexists(self.config):
+            raise ActivationError("unmanaged-host-config")
         generation = max(int((active or {}).get("generation", 0)), int((job or {}).get("generation", 0))) + 1
         return profile, current, active, generation
 
@@ -332,6 +336,7 @@ class NativeActivation:
                 _replace(self.config, new_config, job["previousConfigHash"])
                 expected = self._fence(job, job["targetBundleHash"], job["targetConfigHash"])
                 job["restartPrevious"] = expected
+                job["restartIssuedAtMs"] = int(time.time() * 1000)
                 job["phase"] = "issuing-restart"
                 self._save(self.job_path, job)
                 self.host.issue_restart(job["id"], expected)
@@ -386,14 +391,39 @@ class NativeActivation:
         self._save(self.job_path, job)
         return self._public(job)
 
+    def _await_health(self, job, error):
+        issued = job.get("restartIssuedAtMs")
+        if type(issued) is int and issued > 0 and 0 <= int(time.time() * 1000) - issued <= RESTART_GRACE_MS:
+            return self._public(job, status="pending", phase="awaiting-health", error=None, verified=False)
+        return self._public(job, status="needs-attention", error=error, verified=False)
+
+    def _active_progress(self, job, current):
+        try:
+            active = _json(self.active_path)
+            if (not active or active.get("verified") is not True
+                    or any(active.get(key) != job.get(key) for key in ("id", "target", "mode", "generation", "profileDigest"))
+                    or active.get("hop") != job["newHop"]
+                    or current.get("pendingCommand") is not None or current.get("health") is not True
+                    or any(current.get(key) != active.get(key) for key in ("pid", "startedAt", "hostBundleSha256"))
+                    or active.get("hostBundleSha256") != job["targetBundleHash"]
+                    or _digest(self.host.host_entry) != active["hostBundleSha256"]
+                    or active.get("configDigest") != job["targetConfigHash"]
+                    or _digest(self.config) != active["configDigest"] or not self._hop_ok(job)):
+                raise ActivationError("active-state-drift")
+            return self._public(job)
+        except Exception:
+            return self._public(job, status="needs-attention", error="active-state-drift", verified=False)
+
     def progress(self):
         with self._lock():
             job = _json(self.job_path)
             if job is None:
                 return {"status": "idle", "verified": False}
-            if job["status"] in ("verified", "failed"):
+            if job["status"] == "failed":
                 return self._public(job)
             current = self.host.read_observation()
+            if job["status"] == "verified":
+                return self._active_progress(job, current)
             pending = current.get("pendingCommand")
             if pending is not None:
                 # Pending is expected. This path does not write a journal, touch
@@ -404,14 +434,20 @@ class NativeActivation:
             if job.get("restartPrevious") is None:
                 return self._public(job, status="needs-attention", error="precommand-outcome-uncertain", verified=False)
             try:
+                # File drift is not boot latency and must never receive grace.
+                if (_digest(self.host.host_entry) != job["targetBundleHash"]
+                        or _digest(self.config) != job["targetConfigHash"]):
+                    return self._public(job, status="needs-attention", error="activation-readback-mismatch", verified=False)
                 receipt = self.host.restart_receipt(job["id"], job["restartPrevious"])
                 if receipt.get("verified") is not True:
-                    return self._public(job, status="needs-attention", error="restart-not-verified", verified=False)
+                    return self._await_health(job, "restart-not-verified")
                 observed = receipt["observation"]
                 if (observed.get("hostBundleSha256") != job["targetBundleHash"]
                         or _digest(self.host.host_entry) != job["targetBundleHash"]
-                        or _digest(self.config) != job["targetConfigHash"] or not self._hop_ok(job)):
+                        or _digest(self.config) != job["targetConfigHash"]):
                     return self._public(job, status="needs-attention", error="activation-readback-mismatch", verified=False)
+                if not self._hop_ok(job):
+                    return self._await_health(job, "activation-readback-mismatch")
                 active = {key: job[key] for key in ("id", "target", "mode", "generation", "profileDigest")}
                 active.update(hostBundleSha256=job["targetBundleHash"], configDigest=job["targetConfigHash"],
                               pid=observed["pid"], startedAt=observed["startedAt"], hop=job["newHop"], verified=True)

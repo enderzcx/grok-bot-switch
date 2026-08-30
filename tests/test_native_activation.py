@@ -113,6 +113,9 @@ class NativeActivationTests(unittest.TestCase):
         self.engine.hop.set_host_resolver(lambda hostname: ("8.8.8.8",))
         self.addCleanup(lambda: self.engine.hop.set_host_resolver(old_resolver))
         self.secret = "sk-PRIVATE_KEY_DO_NOT_LEAK"
+        clock = patch.object(na.time, "time", return_value=1000.0)
+        self.clock = clock.start()
+        self.addCleanup(clock.stop)
 
     def tree(self):
         return {str(p.relative_to(self.base)): (p.read_bytes(), p.stat().st_mtime_ns) for p in self.base.rglob("*") if p.is_file()}
@@ -261,6 +264,7 @@ class NativeActivationTests(unittest.TestCase):
         self.engine.begin(profile(), secret=self.secret)
         self.host.consume()
         self.host.healthy = False
+        self.clock.return_value += 61
         before = self.tree()
         result = self.engine.progress()
         self.assertEqual(result["status"], "needs-attention")
@@ -289,6 +293,7 @@ class NativeActivationTests(unittest.TestCase):
         self.activate()
         self.engine.begin(profile("second"), secret=self.secret)
         self.host.consume()
+        self.clock.return_value += 61
         with patch.object(self.hops, "health", return_value={"ok": True, "generation": 1}):
             result = self.engine.progress()
         self.assertEqual(result["status"], "needs-attention")
@@ -381,6 +386,94 @@ class NativeActivationTests(unittest.TestCase):
         self.assertEqual(resumed.progress()["status"], "pending")
         self.host.consume()
         self.assertTrue(resumed.progress()["verified"])
+
+    def test_consumed_restart_gets_read_only_health_grace_then_timeout(self):
+        self.engine.begin(profile(), secret=self.secret)
+        job = json.loads(self.engine.job_path.read_text())
+        self.assertEqual(job["restartIssuedAtMs"], 1_000_000)
+        self.host.consume()
+        self.host.healthy = False
+        before = self.tree()
+        for elapsed in (0, 5, 60):
+            self.clock.return_value = 1000 + elapsed
+            result = self.engine.progress()
+            self.assertEqual(result["status"], "pending")
+            self.assertEqual(result["phase"], "awaiting-health")
+            self.assertFalse(result["verified"])
+            self.assertEqual(self.tree(), before)
+        self.clock.return_value = 1061
+        self.assertEqual(self.engine.progress()["status"], "needs-attention")
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(len(self.host.issued), 1)
+        self.assertFalse(self.hops.stopped)
+        self.host.healthy = True
+        self.assertTrue(self.engine.progress()["verified"])
+
+    def test_existing_command_has_no_grace_deadline(self):
+        self.engine.begin(profile(), secret=self.secret)
+        self.clock.return_value += 1_000_000
+        before = self.tree()
+        self.assertEqual(self.engine.progress()["status"], "pending")
+        self.assertEqual(self.tree(), before)
+
+    def test_restart_timestamp_is_persisted_before_publication(self):
+        real_issue = self.host.issue_restart
+        def inspect_issue(id, expected):
+            job = json.loads(self.engine.job_path.read_text())
+            self.assertEqual(job["restartIssuedAtMs"], 1_000_000)
+            self.assertEqual(job["phase"], "issuing-restart")
+            return real_issue(id, expected)
+        with patch.object(self.host, "issue_restart", side_effect=inspect_issue):
+            self.engine.begin(profile(), secret=self.secret)
+
+    def test_verified_receipt_requires_fresh_identity_files_health_and_hop(self):
+        self.activate()
+        old_pid, old_started = self.host.pid, self.host.started
+        config = self.engine.config.read_bytes()
+        bundle = self.entry.read_bytes()
+        active = self.engine.active_path.read_bytes()
+        mutations = {
+            "pid": lambda: setattr(self.host, "pid", old_pid + 1),
+            "start": lambda: setattr(self.host, "started", old_started + 100),
+            "health": lambda: setattr(self.host, "healthy", False),
+            "config": lambda: self.engine.config.write_bytes(b"FOREIGN_CONFIG"),
+            "bundle": lambda: self.entry.write_bytes(b"FOREIGN_BUNDLE"),
+            "active-missing": lambda: self.engine.active_path.unlink(),
+            "active-replaced": lambda: self.engine.active_path.write_text('{}'),
+            "hop": lambda: setattr(self.hops, "healthy", False),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                mutate()
+                before = self.tree()
+                result = self.engine.progress()
+                self.assertEqual(result["status"], "needs-attention")
+                self.assertFalse(result["verified"])
+                self.assertEqual(self.tree(), before)
+                self.host.pid, self.host.started, self.host.healthy = old_pid, old_started, True
+                self.hops.healthy = True
+                self.engine.config.write_bytes(config)
+                self.entry.write_bytes(bundle)
+                self.engine.active_path.write_bytes(active)
+        self.assertTrue(self.engine.progress()["verified"])
+        self.host.busy = True  # busy is normal for an already verified active host
+        self.assertTrue(self.engine.progress()["verified"])
+
+    def test_unowned_existing_external_config_is_never_overwritten(self):
+        self.root.mkdir(mode=0o700)
+        self.engine.config.parent.mkdir(mode=0o700)
+        self.engine.config.write_bytes(b'{"enabled":false,"foreign":true}')
+        before = self.engine.config.read_bytes()
+        with self.assertRaisesRegex(na.ActivationError, "unmanaged-host-config"):
+            self.engine.plan(profile())
+        with self.assertRaisesRegex(na.ActivationError, "unmanaged-host-config"):
+            self.engine.begin(profile(), secret=self.secret)
+        self.assertEqual(self.engine.config.read_bytes(), before)
+        self.assertFalse(self.hops.started)
+        self.engine.active_path.write_text('{}')
+        with self.assertRaisesRegex(na.ActivationError, "active-state-drift"):
+            self.engine.begin(profile(), secret=self.secret)
+        self.assertEqual(self.engine.config.read_bytes(), before)
 
 
 if __name__ == "__main__":
