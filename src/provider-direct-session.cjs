@@ -47,6 +47,7 @@ var PROVIDER_DIRECT_MAX_FAILURE_BODY_BYTES = 8 * 1024;
 var PROVIDER_DIRECT_REQUEST_TIMEOUT_MS = 120000;
 var ProviderDirectPromptExecutorCtor;
 var providerDirectProtocolRegistry;
+var providerDirectActivatedHostConfig;
 
 function providerDirectIsErrorLike(value) {
   return value != null && typeof value === "object" && typeof value.message === "string";
@@ -696,6 +697,19 @@ function loadProviderDirectConfig() {
   return parseProviderDirectConfig(raw);
 }
 
+function getProviderDirectHostActivation() {
+  if (providerDirectActivatedHostConfig != null) return providerDirectActivatedHostConfig;
+  var config = loadProviderDirectConfig();
+  if (config != null) providerDirectActivatedHostConfig = config;
+  return config;
+}
+
+function assertProviderDirectNativeAudioAllowed() {
+  if (getProviderDirectHostActivation() != null) {
+    throw new Error("Native audio transcription is unsupported in external-only mode");
+  }
+}
+
 function getProviderProtocolRegistry() {
   if (providerDirectProtocolRegistry != null) return providerDirectProtocolRegistry;
   if (typeof __grokProviderRequire === "function") {
@@ -740,7 +754,7 @@ function createProviderDirectPromptSession(options) {
 }
 
 function wrapHostInferenceWithProviderSwitcher(cursorInference, _options) {
-  var directConfig = loadProviderDirectConfig();
+  var directConfig = getProviderDirectHostActivation();
   if (directConfig == null) {
     return cursorInference;
   }

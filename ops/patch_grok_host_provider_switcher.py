@@ -95,6 +95,45 @@ PATCHED_CREATE_HOST_INFERENCE = """function createHostInference(options2) {
   return wrapHostInferenceWithProviderSwitcher(cursorInference, { settings, experiments, auth: auth2 });
 }"""
 
+# Absent in the original pinned .30 bundle; present exactly once in 17184bb.
+# Guard invocation belongs inside the returned function, never host boot.
+TRANSCRIBE_FN_ANCHOR = "function createSandTranscribeAudio("
+STOCK_CREATE_SAND_TRANSCRIBE_AUDIO = """function createSandTranscribeAudio(auth2, options2, createClient2 = createSandCursorBackendClient) {
+  const onRequestId = options2?.onRequestId;
+  let client;
+  const getClient = () => {
+    client ??= createClient2(AiService, {
+      getAccessToken: auth2.getAccessToken,
+      getTeamId: auth2.getTeamId,
+      getMachineId: auth2.getMachineId,
+      ...onRequestId == null ? {} : { onRequestId }
+    });
+    return client;
+  };
+  return async (request3) => {
+    const language = request3.language != null && request3.language.length > 0 ? toWhisperLanguageHint(request3.language) : void 0;
+    const response = await transcribeDeadline.run(
+      (signal) => getClient().transcribeAudio(
+        new TranscribeAudioRequest({
+          audio: new Uint8Array(request3.audio),
+          mimeType: stripMimeParameters(request3.mimeType),
+          ...language == null ? {} : { language }
+        }),
+        { signal }
+      )
+    );
+    return {
+      text: response.text,
+      transcriptionTimeMs: Number(response.transcriptionTimeMs)
+    };
+  };
+}"""
+PATCHED_CREATE_SAND_TRANSCRIBE_AUDIO = STOCK_CREATE_SAND_TRANSCRIBE_AUDIO.replace(
+    "  return async (request3) => {\n",
+    "  return async (request3) => {\n    assertProviderDirectNativeAudioAllowed();\n",
+    1,
+)
+
 SOURCEMAP_ANCHOR = "//# sourceMappingURL=host-main.cjs.map"
 
 CJS_RUNTIME = """var __grokProviderModules = Object.create(null);
@@ -183,6 +222,9 @@ def anchor_counts(text: str) -> Dict[str, int]:
         "marker_end": text.count(MARKER_END),
         "create_cursor_sand": text.count(CREATE_CURSOR_SAND_ANCHOR),
         "sourcemap": text.count(SOURCEMAP_ANCHOR),
+        "transcribe_fn": text.count(TRANSCRIBE_FN_ANCHOR),
+        "transcribe_stock": text.count(STOCK_CREATE_SAND_TRANSCRIBE_AUDIO),
+        "transcribe_patched": text.count(PATCHED_CREATE_SAND_TRANSCRIBE_AUDIO),
     }
 
 
@@ -220,6 +262,8 @@ def _validate_injected_sources(protocol_sources: Mapping[str, str], session_sour
         (INJECTION_ANCHOR, "injection anchor"),
         (STOCK_CREATE_HOST_INFERENCE, "stock createHostInference"),
         (PATCHED_CREATE_HOST_INFERENCE, "patched createHostInference"),
+        (STOCK_CREATE_SAND_TRANSCRIBE_AUDIO, "stock createSandTranscribeAudio"),
+        (PATCHED_CREATE_SAND_TRANSCRIBE_AUDIO, "patched createSandTranscribeAudio"),
         (WRAP_FN_DEF_ANCHOR, "session wrap function"),
     ):
         if needle in combined_protocols:
@@ -227,7 +271,7 @@ def _validate_injected_sources(protocol_sources: Mapping[str, str], session_sour
         if needle in session_source and needle not in (
             WRAP_FN_DEF_ANCHOR,
         ):
-            if needle in (MARKER_BEGIN, MARKER_END, INJECTION_ANCHOR, STOCK_CREATE_HOST_INFERENCE, PATCHED_CREATE_HOST_INFERENCE):
+            if needle in (MARKER_BEGIN, MARKER_END, INJECTION_ANCHOR, STOCK_CREATE_HOST_INFERENCE, PATCHED_CREATE_HOST_INFERENCE, STOCK_CREATE_SAND_TRANSCRIBE_AUDIO, PATCHED_CREATE_SAND_TRANSCRIBE_AUDIO):
                 raise PatchError(f"injected sources must not contain the {name}")
     for name, source in protocol_sources.items():
         if "module.exports" not in source:
@@ -245,8 +289,13 @@ def classify_bundle(text: str, expected_injection: str) -> str:
     counts = anchor_counts(text)
     begin = counts["marker_begin"]
     end = counts["marker_end"]
+    if counts["transcribe_fn"] not in (0, 1):
+        raise PatchError("createSandTranscribeAudio anchor count is ambiguous")
+    expected_transcribe = counts["transcribe_fn"]
 
     if begin == 0 and end == 0:
+        if counts["transcribe_stock"] != expected_transcribe or counts["transcribe_patched"] != 0:
+            raise PatchError("stock createSandTranscribeAudio anchor mismatch")
         if counts["create_host_patched"] != 0:
             raise PatchError("createHostInference wrap present without injection marker")
         if counts["injection_anchor"] != 1:
@@ -290,6 +339,8 @@ def classify_bundle(text: str, expected_injection: str) -> str:
         raise PatchError(
             f"createCursorSandInference count={counts['create_cursor_sand']}, expected 1"
         )
+    if counts["transcribe_patched"] != expected_transcribe or counts["transcribe_stock"] != 0:
+        raise PatchError("patched createSandTranscribeAudio anchor mismatch")
     return "patched"
 
 
@@ -317,6 +368,9 @@ def apply_patch(
     patched = source.replace(INJECTION_ANCHOR, expected_injection + INJECTION_ANCHOR, 1)
     patched = patched.replace(
         STOCK_CREATE_HOST_INFERENCE, PATCHED_CREATE_HOST_INFERENCE, 1
+    )
+    patched = patched.replace(
+        STOCK_CREATE_SAND_TRANSCRIBE_AUDIO, PATCHED_CREATE_SAND_TRANSCRIBE_AUDIO, 1
     )
     if classify_bundle(patched, expected_injection) != "patched":
         raise PatchError("patched output failed postcondition classification")
@@ -427,6 +481,11 @@ def write_rollback_artifacts(
                 "input": input_counts["create_cursor_sand"],
                 "output": output_counts["create_cursor_sand"],
             },
+            "transcribe_patched": {
+                "expected": input_counts["transcribe_fn"],
+                "input": input_counts["transcribe_patched"],
+                "output": output_counts["transcribe_patched"],
+            },
         },
         "rollbackArtifact": str(artifact_path.resolve()),
         "backupManifest": str(manifest_path.resolve()),
@@ -468,13 +527,16 @@ def patch_host_bundle(
     session_text = _decode_utf8(session_raw, "session source")
 
     # Idempotence must not turn marker presence into an unknown-host bypass.
-    # Reverse only our two exact transformations, then fence the stock bytes;
+    # Reverse only our exact transformations, then fence the stock bytes;
     # apply_patch below separately validates the full current injection payload.
     stock_source = source
     if MARKER_BEGIN in source or MARKER_END in source:
         stock_source = stock_source.replace(_extract_injection_block(source), "", 1)
         stock_source = stock_source.replace(
             PATCHED_CREATE_HOST_INFERENCE, STOCK_CREATE_HOST_INFERENCE, 1
+        )
+        stock_source = stock_source.replace(
+            PATCHED_CREATE_SAND_TRANSCRIBE_AUDIO, STOCK_CREATE_SAND_TRANSCRIBE_AUDIO, 1
         )
     recognized_stock_sha256 = sha256_hex(stock_source.encode("utf-8"))
     if recognized_stock_sha256 not in SUPPORTED_STOCK_SHA256:

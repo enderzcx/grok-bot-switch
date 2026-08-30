@@ -225,6 +225,26 @@ class ApplyPatchTests(unittest.TestCase):
         again = PATCHER.apply_patch(patched, protocols, SESSION_SOURCE)
         self.assertEqual(patched, again)
 
+    def test_transcribe_guard_is_inside_dispatch_and_idempotent(self):
+        source = mini_bundle() + PATCHER.STOCK_CREATE_SAND_TRANSCRIBE_AUDIO
+        patched = PATCHER.apply_patch(source, mini_protocol_sources(), SESSION_SOURCE)
+        self.assertEqual(patched.count(PATCHER.PATCHED_CREATE_SAND_TRANSCRIBE_AUDIO), 1)
+        self.assertEqual(patched.count(PATCHER.STOCK_CREATE_SAND_TRANSCRIBE_AUDIO), 0)
+        self.assertIn("return async (request3) => {\n    assertProviderDirectNativeAudioAllowed();", patched)
+        self.assertEqual(PATCHER.apply_patch(patched, mini_protocol_sources(), SESSION_SOURCE), patched)
+        unguarded = patched.replace(PATCHER.PATCHED_CREATE_SAND_TRANSCRIBE_AUDIO, PATCHER.STOCK_CREATE_SAND_TRANSCRIBE_AUDIO)
+        with self.assertRaisesRegex(PATCHER.PatchError, "patched createSandTranscribeAudio anchor mismatch"):
+            PATCHER.apply_patch(unguarded, mini_protocol_sources(), SESSION_SOURCE)
+
+    def test_transcribe_anchor_mismatch_and_duplicates_fail_closed(self):
+        for audio in (
+            PATCHER.STOCK_CREATE_SAND_TRANSCRIBE_AUDIO.replace("const onRequestId", "let onRequestId"),
+            PATCHER.STOCK_CREATE_SAND_TRANSCRIBE_AUDIO * 2,
+            PATCHER.PATCHED_CREATE_SAND_TRANSCRIBE_AUDIO,
+        ):
+            with self.assertRaisesRegex(PATCHER.PatchError, "createSandTranscribeAudio anchor"):
+                PATCHER.apply_patch(mini_bundle() + audio, mini_protocol_sources(), SESSION_SOURCE)
+
     def test_normalizes_crlf_and_missing_trailing_newline_deterministically(self):
         source = mini_bundle()
         protocols = {
@@ -504,6 +524,7 @@ class RealBundleTests(unittest.TestCase):
         self.assertEqual(self.text.count(PATCHER.STOCK_CREATE_HOST_INFERENCE), 1)
         self.assertEqual(self.text.count(PATCHER.CREATE_CURSOR_SAND_ANCHOR), 1)
         self.assertEqual(self.text.count(PATCHER.MARKER_BEGIN), 0)
+        self.assertEqual(self.text.count(PATCHER.TRANSCRIBE_FN_ANCHOR), 0)
         self.assertEqual(
             self.text.count("// src/host/extensions/inference/cursor-session.ts\ninit_dist9();"),
             1,
@@ -551,6 +572,8 @@ class RealBundleTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["input"]["sha256"], PATCHER.STOCK_SHA256)
             self.assertEqual(manifest["stockSha256Expected"], PATCHER.STOCK_SHA256)
+            self.assertEqual(manifest["anchors"]["transcribe_patched"]["expected"], 0)
+            self.assertEqual(manifest["anchors"]["transcribe_patched"]["output"], 0)
             self.assertEqual(manifest["output"]["sha256"], report["outputSha256"])
             artifact = Path(manifest["rollbackArtifact"])
             self.assertEqual(hashlib.sha256(artifact.read_bytes()).hexdigest(), PATCHER.STOCK_SHA256)
@@ -576,6 +599,8 @@ class CurrentHostTests(unittest.TestCase):
         self.assertEqual(text.count(PATCHER.INJECTION_ANCHOR), 1)
         self.assertEqual(text.count(PATCHER.STOCK_CREATE_HOST_INFERENCE), 1)
         self.assertEqual(text.count(PATCHER.CREATE_CURSOR_SAND_ANCHOR), 1)
+        self.assertEqual(text.count(PATCHER.TRANSCRIBE_FN_ANCHOR), 1)
+        self.assertEqual(text.count(PATCHER.STOCK_CREATE_SAND_TRANSCRIBE_AUDIO), 1)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             output, second = root / "patched.cjs", root / "second.cjs"
@@ -585,12 +610,20 @@ class CurrentHostTests(unittest.TestCase):
             self.assertTrue(again["idempotent"])
             self.assertEqual(output.read_bytes(), second.read_bytes())
             self.assertIn("recordFollowupLabeling: function (_args) {}", output.read_text())
+            self.assertEqual(output.read_text().count(PATCHER.PATCHED_CREATE_SAND_TRANSCRIBE_AUDIO), 1)
             for report in (first, again):
                 manifest = json.loads(Path(report["backupManifest"]).read_text())
                 self.assertEqual(report["recognizedStockSha256"], PATCHER.HOST_17184BB_SHA256)
                 self.assertEqual(manifest["stockSha256Expected"], PATCHER.HOST_17184BB_SHA256)
+                self.assertEqual(manifest["anchors"]["transcribe_patched"]["expected"], 1)
+                self.assertEqual(manifest["anchors"]["transcribe_patched"]["output"], 1)
             self.assertEqual(CURRENT_HOST_PATH.read_bytes(), raw)
             node_check(output)
+            unguarded = root / "unguarded.cjs"
+            unguarded.write_text(output.read_text().replace(PATCHER.PATCHED_CREATE_SAND_TRANSCRIBE_AUDIO, PATCHER.STOCK_CREATE_SAND_TRANSCRIBE_AUDIO))
+            with self.assertRaisesRegex(PATCHER.PatchError, "patched createSandTranscribeAudio anchor mismatch"):
+                PATCHER.patch_host_bundle(unguarded, REAL_PROTOCOLS_DIR, REAL_SESSION_PATH, root / "bad.cjs", root / "bad-backup")
+            self.assertFalse((root / "bad.cjs").exists())
 
 
 if __name__ == "__main__":
