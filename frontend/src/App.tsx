@@ -38,9 +38,8 @@ import {
 } from "@/lib/api";
 
 type Review = {
-  kind: "use" | "rollback" | "delete" | "removeKey";
-  profile?: Profile;
-  plan: Plan;
+  kind: "delete" | "removeKey";
+  profile: Profile;
 };
 const message = (error: unknown) =>
   error instanceof Error ? error.message : "操作失败";
@@ -144,6 +143,12 @@ export default function App() {
   const [form, setForm] = useState<Profile | "new" | null>(null);
   const [secretProfile, setSecretProfile] = useState<Profile | null>(null);
   const [review, setReview] = useState<Review | null>(null);
+  const [switchErrors, setSwitchErrors] = useState<Record<string, string>>({});
+  const [rollbackError, setRollbackError] = useState("");
+  const [switching, setSwitching] = useState<{ target: string | null } | null>(
+    null,
+  );
+  const switchInFlight = useRef(false);
   const [view, setView] = useState<"providers" | "activity">("providers");
   const [events, setEvents] = useState<Activity[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
@@ -166,6 +171,7 @@ export default function App() {
       if (seq === serial.current) {
         setStatus(current);
         setProfiles(list.providers);
+        return current;
       }
     } catch (err) {
       if (seq === serial.current) setError(message(err));
@@ -194,22 +200,66 @@ export default function App() {
     }
   }
 
-  async function prepare(kind: Review["kind"], profile?: Profile) {
+  async function switchProvider(profile?: Profile) {
+    if (busy || loading || switchInFlight.current) return;
+    switchInFlight.current = true;
+    setBusy(true);
+    setSwitching({ target: profile?.id ?? null });
+    setNotice("");
+    const report = (reason: string) => {
+      if (profile)
+        setSwitchErrors((errors) => ({ ...errors, [profile.id]: reason }));
+      else setRollbackError(reason);
+    };
+    report("");
+    try {
+      const plan = await api<Plan>(
+        profile ? "/api/plan" : "/api/rollback",
+        profile ? { target: profile.id } : {},
+      );
+      const blockers = planBlockers(plan);
+      if (blockers.length) throw new Error(blockers.join("；"));
+      if (!plan.target || (profile && plan.target !== profile.id))
+        throw new Error("无法确认切换目标，请刷新后重试。");
+      await api(profile ? "/api/use" : "/api/rollback", {
+        target: plan.target,
+        apply: true,
+      });
+      const current = await reload();
+      if (!current)
+        throw new Error("切换请求已提交，但状态读取失败，请刷新确认。");
+      const simulated = current.runtimeKind === "lab-synthetic";
+      if (current.activeProfile !== plan.target || current.blocking.length)
+        throw new Error("尚未确认目标通道已生效，请刷新查看主机状态。");
+      setNotice(
+        simulated
+          ? "模拟切换完成，真实 Grok Bot 未改变。"
+          : "已切换到「" +
+              (profiles.find((p) => p.id === plan.target)?.displayName ||
+                plan.target) +
+              "」。",
+      );
+    } catch (err) {
+      report(message(err));
+    } finally {
+      switchInFlight.current = false;
+      setSwitching(null);
+      setBusy(false);
+    }
+  }
+
+  async function prepare(kind: Review["kind"], profile: Profile) {
     if (busy) return;
     setBusy(true);
     setNotice("");
     setError("");
     try {
-      const plan = await api<Plan>(
-        kind === "use"
-          ? "/api/plan"
-          : kind === "rollback"
-            ? "/api/rollback"
-            : profilePath(profile!.id) +
-              (kind === "delete" ? "/remove" : "/secret/remove"),
-        kind === "use" ? { target: profile!.id } : {},
+      await api(
+        profilePath(profile.id) +
+          (kind === "delete" ? "/remove" : "/secret/remove"),
+        {},
       );
-      setReview({ kind, profile, plan });
+      setReview({ kind, profile });
     } catch (err) {
       setError(message(err));
     } finally {
@@ -221,16 +271,11 @@ export default function App() {
     setBusy(true);
     setError("");
     try {
-      if (review.kind === "use")
-        await api("/api/use", { target: review.plan.target, apply: true });
-      else if (review.kind === "rollback")
-        await api("/api/rollback", { target: review.plan.target, apply: true });
-      else
-        await api(
-          profilePath(review.profile!.id) +
-            (review.kind === "delete" ? "/remove" : "/secret/remove"),
-          { confirm: true },
-        );
+      await api(
+        profilePath(review.profile!.id) +
+          (review.kind === "delete" ? "/remove" : "/secret/remove"),
+        { confirm: true },
+      );
       setReview(null);
       setNotice("操作已完成");
       await reload();
@@ -241,7 +286,7 @@ export default function App() {
     }
   }
   async function action(
-    kind: "plan" | "edit" | "secret" | "test" | "delete",
+    kind: "use" | "edit" | "secret" | "test" | "delete",
     profile: Profile,
   ) {
     setNotice("");
@@ -253,8 +298,12 @@ export default function App() {
       setSecretProfile(profile);
       return;
     }
-    if (kind === "plan" || kind === "delete") {
-      await prepare(kind === "plan" ? "use" : "delete", profile);
+    if (kind === "use") {
+      await switchProvider(profile);
+      return;
+    }
+    if (kind === "delete") {
+      await prepare("delete", profile);
       return;
     }
     setBusy(true);
@@ -276,7 +325,8 @@ export default function App() {
     }
   }
   const isLab = status?.runtimeKind === "lab-synthetic";
-  const blocked = review ? planBlockers(review.plan) : [];
+  const installation = status?.installation;
+  const installed = installation?.installations[0];
   const visible = profiles.filter((p) =>
     (p.displayName + " " + p.id + " " + p.model + " " + p.protocol)
       .toLowerCase()
@@ -341,20 +391,36 @@ export default function App() {
                       ? "模拟环境"
                       : status?.host.wired
                         ? "已接入"
-                        : "主机未接入"}
+                        : installation?.ambiguous
+                          ? "检测到多个安装"
+                          : installed
+                            ? "已检测到 " + installed.version
+                            : installation
+                              ? "未找到 Grok Bot"
+                              : "主机未接入"}
               </span>
             </p>
-            <span className="text-xs text-muted-foreground">
-              仅本机 · 失败不回退
-            </span>
+            <span className="text-xs text-muted-foreground">失败不回退</span>
           </div>
           <p className="mt-2 text-xs text-muted-foreground">
-            {isLab
-              ? "当前连接的是模拟主机，不代表真实 Grok Bot 已切换。"
-              : status?.host.wired
-                ? "切换以主机读回状态为准。"
-                : "可先管理供应商配置。真实主机接入尚未开放。"}
+            {loading
+              ? "正在检查本机 Grok Bot…"
+              : error
+                ? "暂时无法读取状态，请点击刷新重试。"
+                : isLab
+                  ? "当前连接的是模拟主机，不代表真实 Grok Bot 已切换。"
+                  : status?.host.wired
+                    ? "切换以主机读回状态为准。"
+                    : installed
+                      ? "已找到本机 Grok Bot，尚未接入切换。可先管理供应商配置。"
+                      : "请先安装 Grok Bot，安装后点击刷新。"}
           </p>
+          {installed && (
+            <details className="mt-2 text-xs text-muted-foreground">
+              <summary className="cursor-pointer">安装位置</summary>
+              <p className="mt-1 break-all">{installed.path}</p>
+            </details>
+          )}
         </section>
         {error && !review && (
           <p
@@ -395,10 +461,10 @@ export default function App() {
               <Button
                 variant="outline"
                 disabled={disabled}
-                onClick={() => void prepare("rollback")}
+                onClick={() => void switchProvider()}
               >
                 <Undo2 className="h-4 w-4" />
-                切回上一通道
+                {switching?.target === null ? "切换中" : "切回上一通道"}
               </Button>
               <Button
                 variant="outline"
@@ -416,6 +482,14 @@ export default function App() {
         </div>
         {view === "providers" ? (
           <>
+            {rollbackError && (
+              <p
+                role="alert"
+                className="break-words text-sm text-red-600 dark:text-red-300"
+              >
+                {rollbackError}
+              </p>
+            )}
             <div className="relative">
               <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
               <Input
@@ -447,6 +521,8 @@ export default function App() {
                       !error && !isLab && status?.activeProfile === profile.id
                     }
                     busy={disabled || !!error}
+                    switching={switching?.target === profile.id}
+                    switchError={switchErrors[profile.id]}
                     onAction={(kind, p) => void action(kind, p)}
                   />
                 ))
@@ -547,74 +623,6 @@ export default function App() {
           }}
           onConfirm={() => void applyReview()}
         />
-      )}
-      {review && (review.kind === "use" || review.kind === "rollback") && (
-        <Dialog
-          open
-          onOpenChange={(open) => {
-            if (!open && !busy) setReview(null);
-          }}
-        >
-          <DialogContent
-            className="w-[calc(100%-2rem)] max-w-xl"
-            onEscapeKeyDown={(e) => {
-              if (busy) e.preventDefault();
-            }}
-          >
-            <DialogHeader>
-              <DialogTitle>
-                {review.kind === "use" ? "切换计划" : "切回上一通道"}
-              </DialogTitle>
-              <DialogDescription>
-                {review.plan.runtimeKind === "lab-synthetic"
-                  ? "这是模拟切换，不会切换真实 Grok Bot。"
-                  : "确认前不会改变主机。"}
-                {review.kind === "rollback"
-                  ? " 按当前配置重新切换，不是原样恢复历史快照。"
-                  : ""}
-              </DialogDescription>
-            </DialogHeader>
-            <div className="dialog-scroll space-y-4">
-              <p>目标：{review.plan.target || "未确定"}</p>
-              <p className="endpoint font-mono text-xs">
-                {review.plan.resolvedEndpoint
-                  ? "POST " + review.plan.resolvedEndpoint
-                  : "官方通道"}
-              </p>
-              <p className="text-sm text-muted-foreground">
-                {review.plan.protocol} {review.plan.model}
-              </p>
-              {blocked.map((reason) => (
-                <p
-                  key={reason}
-                  className="rounded-lg bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-100 p-3"
-                >
-                  {reason}
-                </p>
-              ))}
-              {error && (
-                <p role="alert" className="text-red-600">
-                  {error}
-                </p>
-              )}
-            </div>
-            <DialogFooter>
-              <Button
-                variant="outline"
-                disabled={busy}
-                onClick={() => setReview(null)}
-              >
-                取消
-              </Button>
-              <Button
-                disabled={busy || blocked.length > 0 || !review.plan.target}
-                onClick={() => void applyReview()}
-              >
-                {busy ? "执行中" : "确认切换"}
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
       )}
     </div>
   );

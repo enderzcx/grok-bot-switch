@@ -32,6 +32,12 @@ export interface Status {
   runtimeKind: string | null;
   blocking: string[];
   host: { wired: boolean };
+  installation?: {
+    detected: boolean;
+    ambiguous: boolean;
+    integrationReady: boolean;
+    installations: { path: string; executable: string; version: string }[];
+  };
 }
 export interface Plan {
   target?: string;

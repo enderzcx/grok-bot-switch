@@ -11,13 +11,17 @@ export function ProviderCard({
   provider,
   active,
   busy,
+  switching,
+  switchError,
   onAction,
 }: {
   provider: Profile;
   active: boolean;
   busy: boolean;
+  switching: boolean;
+  switchError?: string;
   onAction: (
-    action: "plan" | "edit" | "secret" | "test" | "delete",
+    action: "use" | "edit" | "secret" | "test" | "delete",
     profile: Profile,
   ) => void;
 }) {
@@ -73,13 +77,22 @@ export function ProviderCard({
           active={active}
           official={official}
           busy={busy}
-          onPlan={() => onAction("plan", provider)}
+          switching={switching}
+          onUse={() => onAction("use", provider)}
           onEdit={() => onAction("edit", provider)}
           onSecret={() => onAction("secret", provider)}
           onTest={() => onAction("test", provider)}
           onDelete={() => onAction("delete", provider)}
         />
       </div>
+      {switchError && (
+        <p
+          role="alert"
+          className="mt-3 break-words text-sm text-red-600 dark:text-red-300"
+        >
+          {switchError}
+        </p>
+      )}
     </article>
   );
 }

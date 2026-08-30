@@ -1,10 +1,16 @@
 import { beforeEach, expect, test, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import "./i18n";
 import App from "./App";
 import { ProviderForm } from "./components/providers/ProviderForm";
-import { api, endpointPreview, planBlockers, type Profile } from "./lib/api";
+import {
+  api,
+  endpointPreview,
+  planBlockers,
+  type Profile,
+  type Plan,
+} from "./lib/api";
 
 const profile: Profile = {
   schemaVersion: 1,
@@ -112,7 +118,7 @@ test("ported form saves key separately and clears it on failed install", async (
     "/api/providers/test-provider/update",
   );
 });
-test("real list and review flow cannot apply to an unconnected host", async () => {
+test("one-click use reports an unconnected host inline without applying or opening a dialog", async () => {
   const official = {
     ...profile,
     id: "official",
@@ -142,10 +148,14 @@ test("real list and review flow cannot apply to an unconnected host", async () =
   });
   const user = userEvent.setup();
   render(<App />);
-  await user.click(await screen.findByRole("button", { name: "查看计划" }));
+  await user.click(await screen.findByRole("button", { name: "使用" }));
   expect(
-    await screen.findByRole("button", { name: "确认切换" }),
-  ).toBeDisabled();
+    await within(screen.getByRole("article", { name: "官方 Grok" })).findByRole(
+      "alert",
+    ),
+  ).toHaveTextContent("主机未接入");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "使用" })).toBeEnabled();
   expect(vi.mocked(fetch).mock.calls.some(([url]) => url === "/api/use")).toBe(
     false,
   );
@@ -191,4 +201,243 @@ test("a failed initial read is not presented as an empty provider list", async (
   render(<App />);
   await screen.findByRole("alert");
   expect(screen.queryByText("没有匹配的供应商")).not.toBeInTheDocument();
+});
+
+test("installed Grok Bot is detected but never presented as connected or active", async () => {
+  vi.mocked(fetch).mockImplementation(async (url) =>
+    url === "/api/providers"
+      ? json({ providers: [profile] })
+      : json({
+          desiredProfile: "official",
+          activeProfile: null,
+          host: { wired: false },
+          runtimeKind: null,
+          blocking: ["not-wired"],
+          installation: {
+            detected: true,
+            ambiguous: false,
+            integrationReady: false,
+            installations: [
+              {
+                path: "/Applications/Grok Bot.app",
+                executable: "/fixture/Grok Bot",
+                version: "0.30.0",
+              },
+            ],
+          },
+        }),
+  );
+  render(<App />);
+  await screen.findByText("已检测到 0.30.0");
+  expect(
+    screen.getByText("已找到本机 Grok Bot，尚未接入切换。可先管理供应商配置。"),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("使用中")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "连接设置" }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText(/Tailscale|SSH/)).not.toBeInTheDocument();
+});
+
+function mockSwitch(
+  plan: Plan = { target: profile.id, wired: true, blocking: [] },
+  apply: () => Promise<Response> = async () => json({ ok: true }),
+  observed = profile.id,
+) {
+  let applied = false;
+  vi.mocked(fetch).mockImplementation(async (url, options) => {
+    const body = options?.body ? JSON.parse(String(options.body)) : {};
+    if (url === "/api/providers") return json({ providers: [profile] });
+    if (url === "/api/status")
+      return json({
+        activeProfile: applied ? observed : null,
+        desiredProfile: profile.id,
+        host: { wired: true },
+        runtimeKind: "host",
+        blocking: [],
+      });
+    if (url === "/api/plan" || (url === "/api/rollback" && !body.apply))
+      return json(plan);
+    if (url === "/api/use" || url === "/api/rollback") {
+      const response = await apply();
+      applied = response.ok;
+      return response;
+    }
+    if (String(url).endsWith("/remove")) return json({ ok: true });
+    throw new Error("unexpected request " + url);
+  });
+}
+
+test("use silently checks then applies once and displays fresh host status", async () => {
+  let finish!: (response: Response) => void;
+  mockSwitch(
+    undefined,
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const user = userEvent.setup();
+  render(<App />);
+  await user.dblClick(await screen.findByRole("button", { name: "使用" }));
+  expect(screen.getByRole("button", { name: "切换中" })).toBeDisabled();
+  expect(screen.queryByText("使用中")).not.toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  const writes = vi
+    .mocked(fetch)
+    .mock.calls.filter(([, options]) => options?.method === "POST");
+  expect(writes.map(([url]) => url)).toEqual(["/api/plan", "/api/use"]);
+  expect(JSON.parse(String(writes[1][1]?.body))).toEqual({
+    target: profile.id,
+    apply: true,
+  });
+  finish(json({ ok: true }));
+  expect(await screen.findByRole("button", { name: "使用中" })).toBeDisabled();
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "已切换到「测试供应商」",
+  );
+});
+
+test.each([
+  { target: profile.id, blocking: ["busy-agent"] },
+  { target: profile.id, blocking: ["pending-command"] },
+  { target: profile.id, blocking: ["future-blocker"] },
+  {
+    target: profile.id,
+    runtimeKind: "lab-synthetic",
+    allowSyntheticApply: false,
+  },
+  { target: "wrong-target", blocking: [] },
+  { blocking: [] },
+])("blocked or ambiguous preflight never applies: %j", async (plan) => {
+  mockSwitch(plan);
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "使用" }));
+  await within(screen.getByRole("article")).findByRole("alert");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(vi.mocked(fetch).mock.calls.some(([url]) => url === "/api/use")).toBe(
+    false,
+  );
+});
+
+test("apply rejection is inline and retry repeats preflight", async () => {
+  const apply = vi
+    .fn()
+    .mockResolvedValueOnce(
+      json({ error: { message: "主机有任务运行中" } }, 409),
+    )
+    .mockResolvedValueOnce(json({ ok: true }));
+  mockSwitch(undefined, apply);
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "使用" }));
+  expect(
+    await within(screen.getByRole("article")).findByRole("alert"),
+  ).toHaveTextContent("主机有任务运行中");
+  await user.click(screen.getByRole("button", { name: "使用" }));
+  await screen.findByRole("button", { name: "使用中" });
+  expect(
+    vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/plan"),
+  ).toHaveLength(2);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+test("an apply response without matching status is not announced as success", async () => {
+  mockSwitch(undefined, undefined, "official");
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "使用" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "尚未确认目标通道已生效",
+  );
+  expect(screen.queryByText("使用中")).not.toBeInTheDocument();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
+test("switch back also performs preflight and apply without a dialog", async () => {
+  mockSwitch();
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByRole("article");
+  await user.click(screen.getByRole("button", { name: "切回上一通道" }));
+  await screen.findByRole("button", { name: "使用中" });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => url === "/api/rollback")
+      .map(([, options]) => JSON.parse(String(options?.body))),
+  ).toEqual([{}, { target: profile.id, apply: true }]);
+});
+
+test("delete still requires confirmation; cancel never sends confirm", async () => {
+  mockSwitch();
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "删除供应商" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(dialog).toHaveTextContent("不能撤销");
+  await user.click(within(dialog).getByRole("button", { name: "取消" }));
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => String(url).endsWith("/remove"))
+      .map(([, options]) => JSON.parse(String(options?.body))),
+  ).toEqual([{}]);
+});
+
+test("removing a key still requires confirmation", async () => {
+  mockSwitch();
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "管理密钥" }));
+  await user.click(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "移除密钥",
+    }),
+  );
+  const dialog = await screen.findByRole("dialog", { name: "移除密钥" });
+  await user.click(within(dialog).getByRole("button", { name: "取消" }));
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => String(url).endsWith("/secret/remove"))
+      .map(([, options]) => JSON.parse(String(options?.body))),
+  ).toEqual([{}]);
+});
+
+test("blocked switch back shows an inline reason and does not apply", async () => {
+  mockSwitch({ target: profile.id, blocking: ["busy-agent"] });
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByRole("article");
+  await user.click(screen.getByRole("button", { name: "切回上一通道" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "主机有任务运行中",
+  );
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(
+    vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/rollback"),
+  ).toHaveLength(1);
+});
+
+test("readback failure does not announce a successful switch", async () => {
+  mockSwitch();
+  const handler = vi.mocked(fetch).getMockImplementation()!;
+  let reads = 0;
+  vi.mocked(fetch).mockImplementation(async (url, options) => {
+    if (url === "/api/status" && ++reads > 1)
+      return json({ error: { message: "无法读取主机" } }, 500);
+    return handler(url, options);
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "使用" }));
+  expect(
+    await within(screen.getByRole("article")).findByRole("alert"),
+  ).toHaveTextContent("切换请求已提交，但状态读取失败");
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(screen.queryByText("使用中")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "刷新" })).toBeEnabled();
 });

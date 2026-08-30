@@ -1,5 +1,5 @@
 // Adapted from CC Switch ProviderActions.tsx (MIT, Jason Young).
-// Only Grok Bot actions remain; activation always opens a server-side plan.
+// Only Grok Bot actions remain; activation performs a silent server preflight.
 import { Activity, Check, Edit, KeyRound, Play, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -7,7 +7,8 @@ export function ProviderActions({
   active,
   official,
   busy,
-  onPlan,
+  switching,
+  onUse,
   onEdit,
   onSecret,
   onTest,
@@ -16,7 +17,8 @@ export function ProviderActions({
   active: boolean;
   official: boolean;
   busy: boolean;
-  onPlan: () => void;
+  switching: boolean;
+  onUse: () => void;
   onEdit: () => void;
   onSecret: () => void;
   onTest: () => void;
@@ -29,11 +31,11 @@ export function ProviderActions({
         size="sm"
         variant={active ? "secondary" : "default"}
         disabled={busy || active}
-        onClick={onPlan}
+        onClick={onUse}
         className="w-fit px-2.5"
       >
         {active ? <Check className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-        {active ? "使用中" : "查看计划"}
+        {switching ? "切换中" : active ? "使用中" : "使用"}
       </Button>
       <div className="flex items-center gap-1">
         {!official && (
