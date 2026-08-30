@@ -247,7 +247,8 @@ def call(home: Path, action: str, *, profile=None, secret=None, installed_execut
     """One operation, with receiver proof and a shared 35-second network budget.
 
     The private instance is authenticated before any POST, and process/listener
-    ownership is rechecked immediately before dispatch. begin is never retried.
+    ownership is rechecked immediately before dispatch. Both requests use one
+    socket, with automatic reconnect disabled. begin is never retried.
     """
     if action not in ("bootstrap", "inspect", "setup", "plan", "begin", "progress"):
         raise ClientBridgeError("unsupported-operation")
@@ -269,12 +270,11 @@ def call(home: Path, action: str, *, profile=None, secret=None, installed_execut
     body = json.dumps(payload, separators=(",", ":")).encode()
     if len(body) > 65536:
         raise ClientBridgeError("request-too-large")
-    route = "bootstrap" if action == "bootstrap" else "operation"
-    request = urllib.request.Request(f"http://127.0.0.1:{manifest['port']}/v1/{route}", data=body,
-        headers={"Authorization": "Bearer " + manifest["token"], "Content-Type": "application/json"}, method="POST")
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    route = "/v1/bootstrap" if action == "bootstrap" else "/v1/operation"
+    headers = {"Authorization": "Bearer " + manifest["token"], "Content-Type": "application/json"}
     deadline = time.monotonic() + OPERATION_TIMEOUT_SECONDS
     posted = False
+    connection = None
     def remaining():
         timeout = deadline - time.monotonic()
         if timeout <= 0:
@@ -282,10 +282,17 @@ def call(home: Path, action: str, *, profile=None, secret=None, installed_execut
         return timeout
     try:
         with verified_receiver(manifest["pid"], manifest["executable"], manifest["port"]) as receiver:
-            check = urllib.request.Request(f"http://127.0.0.1:{manifest['port']}/v1/status",
-                headers={"Authorization": "Bearer " + manifest["token"], "Accept": "application/json"}, method="GET")
-            with opener.open(check, timeout=remaining()) as response:
-                if response.status != 200 or response.geturl() != check.full_url:
+            # Direct fixed-address HTTPConnection never consults proxies or
+            # follows redirects. Hold this exact connection through the POST.
+            connection = http.client.HTTPConnection("127.0.0.1", manifest["port"], timeout=remaining())
+            connection.auto_open = 0
+            connection.connect()
+            authenticated_socket = connection.sock
+            connection.request("GET", "/v1/status", headers={"Authorization": headers["Authorization"], "Accept": "application/json"})
+            with connection.getresponse() as response:
+                if response.status == 409:
+                    raise ClientBridgeError("probe-busy")
+                if response.status != 200:
                     raise _Invalid()
                 check_raw = response.read(MAX_RESPONSE_BYTES + 1)
                 if len(check_raw) > MAX_RESPONSE_BYTES:
@@ -295,11 +302,16 @@ def call(home: Path, action: str, *, profile=None, secret=None, installed_execut
                 raise _Invalid()
             if _manifest(Path(home), installed_executable) != manifest:
                 raise _Invalid()
-            timeout = remaining()
+            if connection.sock is None or connection.sock is not authenticated_socket:
+                raise _Invalid()
+            connection.sock.settimeout(remaining())
             receiver.recheck()
             posted = True
-            with opener.open(request, timeout=timeout) as response:
-                if response.status != 200 or response.geturl() != request.full_url:
+            connection.request("POST", route, body=body, headers=headers)
+            with connection.getresponse() as response:
+                if response.status == 409:
+                    raise ClientBridgeError("probe-busy")
+                if response.status != 200:
                     raise _Invalid()
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
                 if len(raw) > MAX_RESPONSE_BYTES or manifest["token"].encode() in raw:
@@ -326,9 +338,9 @@ def call(home: Path, action: str, *, profile=None, secret=None, installed_execut
         raise
     except ReceiverError:
         raise ClientBridgeError("receiver-unverified") from None
-    except urllib.error.HTTPError as error:
-        error.close()
-        raise ClientBridgeError("probe-busy" if error.code == 409 else ("native-operation-unconfirmed" if posted else "receiver-unverified")) from None
     except Exception:
         # No automatic retry of begin: the remote journal may already exist.
         raise ClientBridgeError("native-operation-unconfirmed" if posted else "receiver-unverified") from None
+    finally:
+        if connection is not None:
+            connection.close()

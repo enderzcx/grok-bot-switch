@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 import uuid
+import http.client
 from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,6 +30,8 @@ class ClientBridgeTests(unittest.TestCase):
         self.http_status = 200
         self.location = None
         self.post_body = None
+        self.close_after_status = False
+        self.peer_addresses = []
         self.receiver = Mock()
         self.receiver_patch = patch("grokctl.client_bridge.verified_receiver", return_value=nullcontext(self.receiver))
         self.verify_receiver = self.receiver_patch.start()
@@ -44,12 +47,14 @@ class ClientBridgeTests(unittest.TestCase):
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
             def do_POST(self):
                 owner.posts.append(json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0")))))
                 self.do_GET()
 
             def do_GET(self):
                 owner.requests.append((self.path, dict(self.headers)))
+                owner.peer_addresses.append(self.client_address)
                 body = owner.post_body if self.command == "POST" and owner.post_body is not None else owner.body
                 payload = body if isinstance(body, bytes) else json.dumps(body).encode()
                 self.send_response(owner.http_status)
@@ -57,6 +62,9 @@ class ClientBridgeTests(unittest.TestCase):
                     self.send_header("Location", owner.location)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
+                if owner.close_after_status and self.command == "GET":
+                    self.send_header("Connection", "close")
+                    self.close_connection = True
                 self.end_headers()
                 try:
                     self.wfile.write(payload)
@@ -137,6 +145,7 @@ class ClientBridgeTests(unittest.TestCase):
         self.verify_receiver.assert_called_once_with(self.manifest["pid"], self.executable, self.server.server_port)
         self.receiver.recheck.assert_called_once()
         self.assertEqual([path for path, _ in self.requests], ["/v1/status", "/v1/operation"])
+        self.assertEqual(self.peer_addresses[0], self.peer_addresses[1])
 
     def test_false_verified_or_key_echo_is_rejected_without_retry(self):
         self.manifest["mode"] = "native-switch"
@@ -178,6 +187,40 @@ class ClientBridgeTests(unittest.TestCase):
         self.receiver.recheck.side_effect = ReceiverError()
         with self.assertRaises(ClientBridgeError):
             call(self.home, "begin", secret="SENTINEL_KEY")
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.posts, [])
+
+    def test_status_closing_connection_never_reconnects_or_posts_secret(self):
+        self.manifest["mode"] = "native-switch"
+        self.save_manifest()
+        self.body["mode"] = "native-switch"
+        self.close_after_status = True
+        with self.assertRaises(ClientBridgeError) as error:
+            call(self.home, "begin", secret="SENTINEL_KEY")
+        self.assertEqual(error.exception.code, "receiver-unverified")
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.posts, [])
+
+    def test_lost_socket_after_preflight_cannot_reconnect_to_replacement(self):
+        self.manifest["mode"] = "native-switch"
+        self.save_manifest()
+        self.body["mode"] = "native-switch"
+        real_connection = http.client.HTTPConnection
+        connections = []
+        def build(*args, **kwargs):
+            connection = real_connection(*args, **kwargs)
+            connections.append(connection)
+            return connection
+        def replace_receiver():
+            connection = connections[0]
+            self.assertEqual(connection.auto_open, 0)
+            connection.close()
+            # If request() reconnects, the still-listening fixture represents
+            # another listener taking the same port. It must receive no POST.
+        self.receiver.recheck.side_effect = replace_receiver
+        with patch("grokctl.client_bridge.http.client.HTTPConnection", side_effect=build), self.assertRaises(ClientBridgeError):
+            call(self.home, "begin", secret="SENTINEL_KEY")
+        self.assertEqual(len(connections), 1)
         self.assertEqual(len(self.requests), 1)
         self.assertEqual(self.posts, [])
 
