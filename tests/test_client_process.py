@@ -74,17 +74,20 @@ class ClientProcessTests(unittest.TestCase):
             "print(json.dumps({'pid':os.getpid(),'port':listener.getsockname()[1]}),flush=True); "
             "sys.stdin.read(1); listener.close()"
         )
-        child = subprocess.Popen([sys.executable, "-I", "-c", script], stdin=subprocess.PIPE,
+        # A Windows venv python.exe is a launcher that may create a second PID.
+        # Launch the real interpreter to test the listener owner's actual image.
+        executable = getattr(sys, "_base_executable", sys.executable)
+        child = subprocess.Popen([executable, "-I", "-c", script], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         try:
             ready = json.loads(child.stdout.readline(1024))
             self.assertEqual(ready["pid"], child.pid)
-            with verified_receiver(child.pid, sys.executable, ready["port"]) as receiver:
+            with verified_receiver(child.pid, executable, ready["port"]) as receiver:
                 receiver.recheck()
-            with self.assertRaises(ReceiverError), verified_receiver(os.getpid(), sys.executable, ready["port"]):
+            with self.assertRaises(ReceiverError), verified_receiver(os.getpid(), executable, ready["port"]):
                 self.fail("foreign listener accepted")
             wrong_port = ready["port"] + 1 if ready["port"] < 65535 else 1
-            with self.assertRaises(ReceiverError), verified_receiver(child.pid, sys.executable, wrong_port):
+            with self.assertRaises(ReceiverError), verified_receiver(child.pid, executable, wrong_port):
                 self.fail("wrong port accepted")
         finally:
             child.stdin.close()  # EOF cleanly ends only this fixture child.

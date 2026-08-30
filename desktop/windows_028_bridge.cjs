@@ -88,6 +88,21 @@
     const main = '/home/box/sand-host/host-main.cjs';
     const out = {schemaVersion:1, marker:'GROK_SWITCH_EXEC_OK', nodeVersion:process.version,
       hostBundlePresent:fs.existsSync(main), pendingRestart:fs.existsSync('/tmp/sand-supervisor/command.json')};
+    const gateway=JSON.parse(fs.readFileSync('/home/box/sand-data/gateway.json','utf8'));
+    if(Number.isInteger(gateway.pid) && Number.isInteger(gateway.port)) {
+      out.gateway={pid:gateway.pid,port:gateway.port,scheme:['http','https'].includes(gateway.scheme)?gateway.scheme:null,
+        bind:['127.0.0.1','0.0.0.0','::','::1'].includes(gateway.host)?gateway.host:'other'};
+      const proc='/proc/'+gateway.pid;
+      out.hostProcessMatches=fs.readFileSync(proc+'/cmdline','utf8').split('\\0').includes(main);
+      const inodes=new Set();
+      for(const fd of fs.readdirSync(proc+'/fd')) {try {const link=fs.readlinkSync(proc+'/fd/'+fd); if(link.startsWith('socket:[')) inodes.add(link.slice(8,-1));} catch(_) {}}
+      out.ownedBindings=[];
+      for(const file of ['tcp','tcp6']) for(const row of fs.readFileSync(proc+'/net/'+file,'utf8').split('\\n')) {
+        const fields=row.trim().split(/\\s+/);
+        if(fields.length>=10 && fields[3]==='0A' && inodes.has(fields[9]) && parseInt(fields[1].split(':')[1],16)===gateway.port)
+          out.ownedBindings.push({family:file,address:fields[1].split(':')[0]});
+      }
+    }
     if(out.hostBundlePresent) {const stat=fs.lstatSync(main); if(stat.isFile() && !stat.isSymbolicLink() && stat.size<64*1024*1024) {
       out.hostBundleSha256=crypto.createHash('sha256').update(fs.readFileSync(main)).digest('hex'); out.hostBundleSize=stat.size;}}
     const statusPath='/tmp/sand-supervisor/status.json';
