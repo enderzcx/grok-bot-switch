@@ -8,7 +8,7 @@
 
 ## 使用
 
-Python 3.10+；运行协议/host 测试另需 Node.js。无需安装运行时第三方依赖。在仓库目录运行：
+Python 3.10+；运行协议/host 测试另需 Node.js。Python 服务不需要第三方包，React 前端及依赖已打包在仓库内。在仓库目录运行：
 
 ```bash
 python3 -m grokctl --home runtime/operator-state ui
@@ -55,6 +55,24 @@ python3 -m grokctl --home runtime/operator-state status --json
 - 当前单次 host 请求截止时间为 120 秒；成功响应总量上限 64 MiB、单个 SSE 事件 1 MiB。超过限制明确失败，不换供应商重试。
 
 ## 验证与下一阶段
+
+### CC Switch 前端源码移植
+
+当前面板直接移植并改造自 CC Switch 的 React 源码，不再维护此前手写的 HTML/JS 面板。包含 15 份原样组件/工具源码，以及适配 Grok Bot 的供应商卡片、操作区和全屏表单。保留上游主题和交互，数据调用改接 `grokctl`，不带入 Tauri 或其它客户端的配置写入逻辑。
+
+来源、固定 commit 和改造清单见 [frontend/UPSTREAM.md](frontend/UPSTREAM.md)；版权和依赖声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+修改前端后使用 Node 20.19+ 或 22.12+ 在 `frontend/` 执行：
+
+```bash
+npm ci
+npm test
+npm run build
+```
+
+构建产物写入 `grokctl/web/`。普通使用者运行 Python CLI 即可，无需启动 Vite 或安装 Tauri。
+
+### 后端验证
 
 ```bash
 python3 -m unittest discover -s tests

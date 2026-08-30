@@ -512,7 +512,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             ("X-Content-Type-Options", "nosniff"),
             ("X-Frame-Options", "DENY"),
             ("Referrer-Policy", "no-referrer"),
-            ("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; font-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"),
+            ("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'nonce-" + self.panel.csrf_token + "'; connect-src 'self'; img-src 'none'; font-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"),
             ("X-Robots-Tag", "noindex"),
         ]
 

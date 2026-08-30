@@ -48,6 +48,11 @@ gap, not merely an approval gate. Live provider validation and provider-owned
 OAuth adapters are also unimplemented. See `provider-switcher-local-evidence.md`
 for tested boundaries and remaining work.
 
+UI update (2026-08-30, owner-requested): the earlier hand-written browser panel
+has been replaced by a CC Switch React source transplant. See
+`cc-switch-ui-port.md` and `../frontend/UPSTREAM.md` for the exact upstream pin,
+unchanged source manifest, adaptation boundaries and new rendered tests.
+
 The public recovery action is now named `switch-back`; `rollback` remains a CLI
 compatibility alias. It validates the prior snapshot/receipt then starts a new
 switch using the current profile. It does not restore the exact historical
@@ -363,8 +368,8 @@ Rules:
 
 ## 7. Architecture And Risk
 
-- Runtime model: Python standard-library control plane and local UI; injectable CommonJS host adapters; Python loopback hop; atomic filesystem state; existing Tailscale SSH and supervisor restart contract for remote activation.
-- Key dependencies: Python 3.9+, Node runtime already present in the Grok Bot host, `ssh`, pinned host bundle, and provider endpoint availability. No new third-party runtime dependency is required for v0.1.
+- Runtime model: Python standard-library control plane serves a bundled React UI transplanted from CC Switch; injectable CommonJS host adapters; Python loopback hop; atomic filesystem state. Real SSH/supervisor integration remains unimplemented.
+- Key dependencies: Python for the CLI, bundled React/Radix/i18next for the browser, Node for protocol tests and frontend builds. End users do not run a Vite or Tauri server. Frontend dependencies are lockfile-pinned and carry third-party notices.
 - Fallback behavior: never. A selected provider error is a visible failed turn. Switching to official is an explicit transaction.
 - Biggest architecture risk: conflating provider identity, authentication, and protocol dialect. The registry keeps these independent and resolves them into one immutable activation plan.
 - Credential risk: secrets copied to argv, config, logs, browser storage, or a shared file. All secret APIs use stdin/private files and negative permission tests.
