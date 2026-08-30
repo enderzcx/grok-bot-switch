@@ -54,10 +54,13 @@
     btnActivity: document.getElementById("btn-activity"),
     dialog: document.getElementById("add-dialog"),
     form: document.getElementById("add-form"),
+    addTitle: document.getElementById("add-title"),
+    addNote: document.getElementById("add-note"),
     addError: document.getElementById("add-error"),
     headerRows: document.getElementById("header-rows"),
     preview: document.getElementById("add-preview"),
     adapterWrap: document.getElementById("adapter-wrap"),
+    secretWrap: document.getElementById("secret-wrap"),
     fieldId: document.getElementById("field-id"),
     fieldName: document.getElementById("field-name"),
     fieldProtocol: document.getElementById("field-protocol"),
@@ -72,6 +75,8 @@
   var reviewKind = null;
   var reviewTarget = null;
   var busy = false;
+  var dialogMode = "add";
+  var editSnapshot = null;
 
   function text(node, value) {
     if (!node) return;
@@ -285,6 +290,7 @@
       addBtn(actions, "测试配置", function () { testProvider(item.id); });
       addBtn(actions, "查看计划", function () { openReview("use", item.id); });
       if (item.id !== "official") {
+        addBtn(actions, "编辑", function () { openEdit(item); });
         addBtn(actions, "删除", function () { openReview("remove", item.id); }, "danger-quiet");
       }
 
@@ -535,28 +541,72 @@
   function resetDialog() {
     els.form.reset();
     els.fieldSecret.value = "";
+    els.fieldId.readOnly = false;
+    els.fieldId.removeAttribute("aria-readonly");
     clearChildren(els.headerRows);
-    addHeaderRow("", "");
     show(els.addError, false);
     els.adapterWrap.hidden = true;
+    show(els.secretWrap, true);
+    var advanced = els.form.querySelector("details.advanced");
+    if (advanced) advanced.open = false;
     updatePreview();
   }
 
   function openAdd() {
+    dialogMode = "add";
+    editSnapshot = null;
     resetDialog();
+    addHeaderRow("", "");
+    text(els.addTitle, "添加提供方");
+    text(els.addNote, "先保存配置，密钥单独写入，提交后输入框会清空。");
+    if (els.dialog.showModal) els.dialog.showModal();
+  }
+
+  function openEdit(item) {
+    dialogMode = "edit";
+    editSnapshot = item || {};
+    resetDialog();
+    show(els.secretWrap, false);
+    els.fieldSecret.value = "";
+    els.fieldId.value = item.id || "";
+    els.fieldId.readOnly = true;
+    els.fieldId.setAttribute("aria-readonly", "true");
+    els.fieldName.value = item.displayName || "";
+    els.fieldProtocol.value = item.protocol || "openai-chat";
+    els.fieldBase.value = item.baseUrl || "";
+    els.fieldModel.value = item.model || "";
+    var authType = item.authType || (item.auth && item.auth.type) || "bearer";
+    els.fieldAuth.value = authType;
+    els.adapterWrap.hidden = authType !== "oauth-adapter";
+    els.fieldAdapter.value = (item.auth && item.auth.adapter) || "";
+    els.fieldPath.value = item.endpointPath || "";
+    var headers = item.headers || {};
+    var names = Object.keys(headers);
+    if (!names.length) {
+      addHeaderRow("", "");
+    } else {
+      names.forEach(function (name) {
+        addHeaderRow(name, headers[name]);
+      });
+    }
+    text(els.addTitle, "编辑提供方");
+    var note = "只改配置，不改密钥。编号不能改。";
+    if (item.secret && item.secret.installed) {
+      note += "要改认证方式，请先移除密钥。";
+    }
+    text(els.addNote, note);
+    updatePreview();
     if (els.dialog.showModal) els.dialog.showModal();
   }
 
   function closeAdd() {
     els.fieldSecret.value = "";
+    dialogMode = "add";
+    editSnapshot = null;
     if (els.dialog.open) els.dialog.close();
   }
 
-  els.form.addEventListener("submit", function (event) {
-    event.preventDefault();
-    show(els.addError, false);
-    var secret = els.fieldSecret.value;
-    els.fieldSecret.value = "";
+  function buildProfileFromForm() {
     var profile = {
       schemaVersion: 1,
       id: els.fieldId.value.trim(),
@@ -572,13 +622,39 @@
     var path = els.fieldPath.value.trim();
     if (path) profile.endpointPath = path;
     if (profile.auth.type === "oauth-adapter") profile.auth.adapter = els.fieldAdapter.value.trim();
-    api("POST", "/api/providers", profile).then(function (created) {
-      var next = Promise.resolve();
-      if (secret) {
-        next = api("POST", "/api/providers/" + encodeURIComponent(created.id) + "/secret", { secret: secret });
+    if (dialogMode === "edit" && editSnapshot) {
+      profile.id = editSnapshot.id;
+      if (typeof editSnapshot.enabled === "boolean") profile.enabled = editSnapshot.enabled;
+      if (
+        editSnapshot.parameters &&
+        typeof editSnapshot.parameters === "object" &&
+        !Array.isArray(editSnapshot.parameters)
+      ) {
+        profile.parameters = editSnapshot.parameters;
       }
-      return next;
-    }).then(function () {
+    }
+    return profile;
+  }
+
+  els.form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    show(els.addError, false);
+    var editing = dialogMode === "edit" && editSnapshot && editSnapshot.id;
+    var secret = editing ? "" : els.fieldSecret.value;
+    els.fieldSecret.value = "";
+    var profile = buildProfileFromForm();
+    var req;
+    if (editing) {
+      req = api("POST", "/api/providers/" + encodeURIComponent(editSnapshot.id) + "/update", profile);
+    } else {
+      req = api("POST", "/api/providers", profile).then(function (created) {
+        if (secret) {
+          return api("POST", "/api/providers/" + encodeURIComponent(created.id) + "/secret", { secret: secret });
+        }
+        return created;
+      });
+    }
+    req.then(function () {
       closeAdd();
       return loadAll();
     }).catch(function (err) {
@@ -595,7 +671,11 @@
   });
   document.getElementById("btn-add-header").addEventListener("click", function () { addHeaderRow("", ""); });
   document.getElementById("btn-add-cancel").addEventListener("click", closeAdd);
-  els.dialog.addEventListener("close", function () { els.fieldSecret.value = ""; });
+  els.dialog.addEventListener("close", function () {
+    els.fieldSecret.value = "";
+    dialogMode = "add";
+    editSnapshot = null;
+  });
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape" && !els.dialog.open) {
       show(els.review, false);

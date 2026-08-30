@@ -452,6 +452,11 @@ select {
   background: var(--canvas);
 }
 
+input[readonly] {
+  color: var(--muted);
+  background: var(--surface);
+}
+
 .header-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;

@@ -410,6 +410,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             raise NotFoundError("未找到")
         profile_id = match.group(1)
         rest = match.group(2) or ""
+        if rest == "/update":
+            return self.panel.service.update_provider(profile_id, body)
         if rest == "/remove":
             return self._remove_provider(profile_id, body)
         if rest == "/secret":

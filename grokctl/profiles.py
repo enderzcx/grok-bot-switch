@@ -150,6 +150,25 @@ class ProfileRegistry:
         self.save(profiles)
         return self.get(profile.id)
 
+    def update(self, profile_id: str, raw: Any) -> ProviderProfile:
+        profile_id = validate_profile_id(profile_id, allow_official=True)
+        if profile_id == OFFICIAL_ID:
+            raise ConflictError("官方通道不能修改")
+        profiles = self.load()
+        if profile_id not in profiles:
+            raise NotFoundError(f"未找到提供方 {profile_id}")
+        if isinstance(raw, ProviderProfile):
+            incoming = raw
+        else:
+            incoming = parse_profile(raw, allow_official=False)
+        if incoming.id != profile_id:
+            raise ConflictError("提供方编号不能修改")
+        if incoming.built_in:
+            raise ConflictError("官方通道不能修改")
+        profiles[profile_id] = incoming
+        self.save(profiles)
+        return self.get(profile_id)
+
     def remove(self, profile_id: str) -> ProviderProfile:
         profile_id = validate_profile_id(profile_id, allow_official=True)
         if profile_id == OFFICIAL_ID:

@@ -39,6 +39,7 @@ from grokctl.models import (
     SecretError,
     ValidationError,
     official_profile,
+    parse_profile,
     validate_profile_id,
 )
 from grokctl.profiles import ProfileRegistry, ensure_private_dir
@@ -170,6 +171,24 @@ class GrokctlService:
             profile = self.registry.add(raw)
             self._append_activity("provider.added", profile_id=profile.id)
             return public_profile(profile, self._secret_for(profile))
+
+    def update_provider(self, profile_id: str, raw: Any) -> dict[str, object]:
+        with self._lock.holding():
+            existing = self.registry.get(profile_id)
+            if existing.id == OFFICIAL_ID or existing.built_in or existing.mode == "official":
+                raise ConflictError("官方通道不能修改")
+            _config, runtime = self._host()
+            if existing.id in referenced_profile_ids(runtime):
+                raise ConflictError("该提供方正在使用，不能修改。请新建提供方。")
+            incoming = parse_profile(raw, allow_official=False)
+            if incoming.id != existing.id:
+                raise ConflictError("提供方编号不能修改")
+            secret = self._secret_for(existing)
+            if secret.installed and incoming.auth.type != existing.auth.type:
+                raise ConflictError("请先移除密钥，再更改认证方式")
+            updated = self.registry.update(existing.id, incoming)
+            self._append_activity("provider.updated", profile_id=updated.id)
+            return public_profile(updated, self._secret_for(updated))
 
     def remove_provider(self, profile_id: str) -> dict[str, object]:
         with self._lock.holding():

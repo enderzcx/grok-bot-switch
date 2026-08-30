@@ -64,6 +64,9 @@ def _build_parser() -> _ArgumentParser:
     add = providers_sub.add_parser("add", help="添加提供方")
     add.add_argument("--file", required=True, help="提供方 JSON 文件")
     providers_sub.add_parser("show", help="查看提供方").add_argument("profile")
+    update = providers_sub.add_parser("update", help="更新提供方")
+    update.add_argument("profile")
+    update.add_argument("--file", required=True, help="提供方 JSON 文件")
     providers_sub.add_parser("remove", help="删除提供方").add_argument("profile")
 
     secret = sub.add_parser("secret", help="管理密钥")
@@ -297,6 +300,14 @@ def _dispatch(service: GrokctlService, args: argparse.Namespace, stdin: Any) -> 
         if action == "show":
             payload = service.show_provider(args.profile)
             return payload, _format_show(payload)
+        if action == "update":
+            path = Path(args.file)
+            try:
+                raw = path.read_bytes()
+            except OSError as exc:
+                raise ValidationError("无法读取配置文件") from exc
+            payload = service.update_provider(args.profile, raw)
+            return payload, ["已更新提供方 " + str(payload["id"]), *_format_show(payload)[1:]]
         if action == "remove":
             payload = service.remove_provider(args.profile)
             return payload, [f"已删除提供方 {payload['id']}"]

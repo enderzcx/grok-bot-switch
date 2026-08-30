@@ -109,7 +109,7 @@
   <dialog id="add-dialog" aria-labelledby="add-title">
     <form id="add-form" method="dialog">
       <h2 id="add-title">添加提供方</h2>
-      <p class="dialog-note">先保存配置，密钥单独写入，提交后输入框会清空。</p>
+      <p id="add-note" class="dialog-note">先保存配置，密钥单独写入，提交后输入框会清空。</p>
       <p id="add-error" class="banner" hidden></p>
       <div class="fields">
         <label>编号
@@ -142,7 +142,7 @@
         <label id="adapter-wrap" hidden>适配器
           <input id="field-adapter" name="adapter" autocomplete="off" spellcheck="false">
         </label>
-        <label>密钥（写入后不会再显示）
+        <label id="secret-wrap">密钥（写入后不会再显示）
           <input id="field-secret" name="secret" type="password" autocomplete="off" spellcheck="false">
         </label>
       </div>
