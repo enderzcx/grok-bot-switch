@@ -21,6 +21,17 @@ from ops.patch_grok_host_provider_switcher import (
 
 ROOT = Path("/workspace/grok-home")
 MAX_REQUEST = 64 * 1024
+PUBLIC_ERRORS = frozenset(("host-not-healthy-idle", "supervisor-command-pending",
+    "activation-in-progress", "active-state-drift", "unknown-host-bundle",
+    "supervisor-source-mismatch", "unmanaged-patched-host", "unmanaged-host-config"))
+
+
+def public_error(error: Exception) -> str:
+    from ops.native_activation import ActivationError
+    from ops.native_controller import NativeControllerError
+    if isinstance(error, (ActivationError, NativeControllerError)) and str(error) in PUBLIC_ERRORS:
+        return str(error)
+    return "native-operation-failed"
 
 
 def artifacts(host: NativeHost) -> dict:
@@ -165,9 +176,9 @@ def main():
         if not isinstance(request, dict):
             raise ValueError("invalid-request")
         result = dispatch(request)
-    except Exception:
+    except Exception as error:
         # Never print exception text: provider validation can involve secret input.
-        result = {"ok": False, "error": "native-operation-failed"}
+        result = {"ok": False, "error": public_error(error)}
     finally:
         request_path.unlink(missing_ok=True)
     print(json.dumps(result, separators=(",", ":")))

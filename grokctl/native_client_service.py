@@ -39,6 +39,12 @@ class NativeClientService:
             messages = {"probe-only": "当前是连接测试模式，请完成接入后使用。",
                         "probe-busy": "Grok Bot 正在处理另一项操作，请稍后刷新。",
                         "invalid-pairing": "请打开 Grok Bot，并重新连接。",
+                        "host-not-healthy-idle": "Grok Bot 正在工作或暂未就绪，请等待任务结束后再切换。",
+                        "supervisor-command-pending": "Grok Bot 已有等待处理的操作，请稍后检查进度。",
+                        "activation-in-progress": "已有尚未确认的切换，请先检查该切换进度。",
+                        "active-state-drift": "Grok Bot 的运行状态已变化，请先检查连接，不会覆盖当前状态。",
+                        "unknown-host-bundle": "当前 Grok Bot 云端版本尚未支持，未执行切换。",
+                        "supervisor-source-mismatch": "当前 Grok Bot 重启组件版本尚未支持，未执行切换。",
                         "native-operation-unconfirmed": "操作结果尚未确认，请刷新进度，不要重复切换。"}
             raise GrokctlError(messages.get(error.code, "Grok Bot 未完成此操作，请检查连接和运行状态。"), code=error.code) from None
 

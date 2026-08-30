@@ -83,6 +83,12 @@ class NativeRunnerTests(unittest.TestCase):
                 self.assertEqual(result["activeProfile"], "official")
                 self.observation[field] = previous
 
+    def test_public_errors_are_fixed_and_never_raw_exception_text(self):
+        from ops.native_activation import ActivationError
+        self.assertEqual(runner.public_error(ActivationError("host-not-healthy-idle")), "host-not-healthy-idle")
+        self.assertEqual(runner.public_error(ValueError("host-not-healthy-idle")), "native-operation-failed")
+        self.assertEqual(runner.public_error(ActivationError("SECRET_SENTINEL")), "native-operation-failed")
+
 
 if __name__ == "__main__":
     unittest.main()
