@@ -330,7 +330,7 @@ test("unsupported request and stream shapes are rejected instead of flattened", 
     assertCode(
       () => adapter.buildRequest({
         ...request,
-        messages: [{ role: "user", content: [{ type: "file", data: "abc", mimeType: "text/plain" }] }]
+        messages: [{ role: "user", content: [{ type: "video", data: "abc" }] }]
       }),
       "unsupported-shape",
       id
@@ -338,7 +338,7 @@ test("unsupported request and stream shapes are rejected instead of flattened", 
     assertCode(
       () => adapter.buildRequest({
         ...request,
-        messages: [{ role: "assistant", content: [{ type: "redacted-reasoning", data: "secret" }] }]
+        messages: [{ role: "assistant", content: [{ type: "audio", data: "secret" }] }]
       }),
       "unsupported-shape",
       id
@@ -515,7 +515,13 @@ test("OpenAI Responses reasoning continuation emits and replays opaque provider 
   assert.deepEqual(ordinary.body.include, ["reasoning.encrypted_content"]);
   assert.equal(ordinary.body.input.some((item) => item.type === "reasoning"), false);
 
-  assertCode(() => adapter.buildRequest(continuationRequest(undefined)), "unsupported-shape", "openai-responses");
+  // Reasoning from another provider (no state for this protocol) is replayed
+  // without reasoning items rather than rejected.
+  const foreign = adapter.buildRequest(continuationRequest(undefined));
+  assert.equal(foreign.body.input.some((item) => item.type === "reasoning"), false);
+  assert.equal(foreign.body.input[1].type, "function_call");
+  const crossProtocol = adapter.buildRequest(continuationRequest({ protocol: "anthropic-messages", items: [{ type: "thinking", thinking: "plan", signature: "s" }] }));
+  assert.equal(crossProtocol.body.input.some((item) => item.type === "reasoning"), false);
   assertCode(
     () => adapter.buildRequest(continuationRequest({ protocol: "openai-responses", items: [{ type: "reasoning", id: "rs_1" }] })),
     "unsupported-shape",
@@ -525,14 +531,6 @@ test("OpenAI Responses reasoning continuation emits and replays opaque provider 
     () => adapter.buildRequest(continuationRequest({
       protocol: "openai-responses",
       items: [{ type: "reasoning", id: "rs_1", encrypted_content: "" }]
-    })),
-    "unsupported-shape",
-    "openai-responses"
-  );
-  assertCode(
-    () => adapter.buildRequest(continuationRequest({
-      protocol: "anthropic-messages",
-      items: state.items
     })),
     "unsupported-shape",
     "openai-responses"
@@ -574,7 +572,11 @@ test("Anthropic thinking continuation emits and replays signed provider state", 
   assert.equal(JSON.stringify(ordinary.body.messages).includes("thinking"), false);
   assert.equal(JSON.stringify(ordinary.body.messages).includes("signature"), false);
 
-  assertCode(() => adapter.buildRequest(continuationRequest(undefined)), "unsupported-shape", "anthropic-messages");
+  const foreign = adapter.buildRequest(continuationRequest(undefined));
+  assert.equal(JSON.stringify(foreign.body.messages).includes("thinking"), false);
+  assert.equal(foreign.body.messages[1].content[0].type, "tool_use");
+  const crossProtocol = adapter.buildRequest(continuationRequest({ protocol: "openai-responses", items: state.items.map(() => ({ type: "reasoning", id: "rs_1", encrypted_content: "x" })) }));
+  assert.equal(JSON.stringify(crossProtocol.body.messages).includes("thinking"), false);
   assertCode(
     () => adapter.buildRequest(continuationRequest({
       protocol: "anthropic-messages",
@@ -587,14 +589,6 @@ test("Anthropic thinking continuation emits and replays signed provider state", 
     () => adapter.buildRequest(continuationRequest({
       protocol: "anthropic-messages",
       items: [{ type: "thinking", thinking: "plan", signature: "" }]
-    })),
-    "unsupported-shape",
-    "anthropic-messages"
-  );
-  assertCode(
-    () => adapter.buildRequest(continuationRequest({
-      protocol: "openai-responses",
-      items: state.items
     })),
     "unsupported-shape",
     "anthropic-messages"
@@ -683,11 +677,8 @@ test("providerState is bound to visible assistant reasoning", () => {
     "unsupported-shape",
     "openai-responses"
   );
-  assertCode(
-    () => responses.buildRequest(continuationRequest(matchingResponses, { omitReasoning: true })),
-    "unsupported-shape",
-    "openai-responses"
-  );
+  const responsesNoText = responses.buildRequest(continuationRequest(matchingResponses, { omitReasoning: true }));
+  assert.equal(responsesNoText.body.input.some((item) => item.type === "reasoning"), false);
 
   assertCode(
     () => anthropic.buildRequest(continuationRequest({
@@ -708,11 +699,77 @@ test("providerState is bound to visible assistant reasoning", () => {
     "unsupported-shape",
     "anthropic-messages"
   );
-  assertCode(
-    () => anthropic.buildRequest(continuationRequest(matchingAnthropic, { omitReasoning: true })),
-    "unsupported-shape",
-    "anthropic-messages"
-  );
+  const anthropicNoText = anthropic.buildRequest(continuationRequest(matchingAnthropic, { omitReasoning: true }));
+  assert.equal(JSON.stringify(anthropicNoText.body.messages).includes("thinking"), false);
+});
+
+// Shapes copied from the Grok Bot host's conversationHistoryToCoreMessages:
+// redacted reasoning, signed reasoning without our providerState, screenshot
+// tool results, file attachments and an empty assistant turn.
+const OFFICIAL_HISTORY = [
+  { role: "system", content: "You are helpful." },
+  { role: "user", content: [{ type: "text", text: "Open the page" }, { type: "file", data: "JVBERi0=", filename: "spec.pdf", mimeType: "application/pdf" }] },
+  {
+    role: "assistant",
+    content: [
+      { type: "redacted-reasoning", data: "opaque-official-blob" },
+      { type: "reasoning", text: "I should take a screenshot.", signature: "grok-sig" },
+      { type: "tool-call", toolCallId: "call_shot", toolName: "screenshot", args: {} }
+    ]
+  },
+  {
+    role: "tool",
+    content: [{
+      type: "tool-result",
+      toolCallId: "call_shot",
+      toolName: "screenshot",
+      result: "captured 1 frame",
+      experimental_content: [
+        { type: "text", text: "captured 1 frame" },
+        { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }
+      ]
+    }]
+  },
+  { role: "assistant", content: "" },
+  { role: "user", content: [{ type: "text", text: "What do you see?" }, { type: "image", image: "R0lGODlh" }] }
+];
+
+test("history from official Grok is degraded, not rejected", () => {
+  const request = { model: "m", stream: true, maxTokens: 64, messages: OFFICIAL_HISTORY, tools: [{ name: "screenshot", parameters: { type: "object", properties: {} } }] };
+  const chat = protocols.getAdapter("openai-chat").buildRequest(request).body;
+  assert.deepEqual(chat.messages.map((m) => m.role), ["system", "user", "assistant", "tool", "user", "user"]);
+  assert.deepEqual(chat.messages[1].content, [
+    { type: "text", text: "Open the page" },
+    { type: "text", text: "[Attached file omitted: spec.pdf (application/pdf)]" }
+  ]);
+  assert.equal(chat.messages[2].content, null);
+  assert.equal("reasoning_content" in chat.messages[2], false);
+  assert.equal(chat.messages[2].tool_calls[0].id, "call_shot");
+  assert.equal(chat.messages[3].content, "captured 1 frame");
+  assert.deepEqual(chat.messages[4].content, [
+    { type: "text", text: "[Image output of tool screenshot]" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } }
+  ]);
+  assert.equal(JSON.stringify(chat).includes("opaque-official-blob"), false);
+
+  const responses = protocols.getAdapter("openai-responses").buildRequest(request).body;
+  assert.equal(responses.instructions, "You are helpful.");
+  assert.deepEqual(responses.input.map((item) => item.type), ["message", "function_call", "function_call_output", "message", "message"]);
+  assert.equal(responses.input.some((item) => item.type === "reasoning"), false);
+  assert.equal(responses.input[3].content[1].type, "input_image");
+
+  const anthropic = protocols.getAdapter("anthropic-messages").buildRequest(request).body;
+  assert.deepEqual(anthropic.messages.map((m) => m.role), ["user", "assistant", "user"]);
+  assert.deepEqual(anthropic.messages[1].content, [{ type: "tool_use", id: "call_shot", name: "screenshot", input: {} }]);
+  const toolResult = anthropic.messages[2].content[0];
+  assert.equal(toolResult.type, "tool_result");
+  assert.deepEqual(toolResult.content, [
+    { type: "text", text: "captured 1 frame" },
+    { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } }
+  ]);
+  assert.deepEqual(anthropic.messages[2].content[1], { type: "text", text: "What do you see?" });
+  assert.deepEqual(anthropic.messages[2].content[2], { type: "image", source: { type: "base64", media_type: "image/png", data: "R0lGODlh" } });
+  assert.deepEqual(chat.messages[5].content[1], { type: "image_url", image_url: { url: "data:image/png;base64,R0lGODlh" } });
 });
 
 test("fragmented multibyte text is reconstructed", () => {

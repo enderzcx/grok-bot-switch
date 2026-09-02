@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// grok-switch 0.4.0 - https://github.com/enderzcx/grok-bot-switch
+// grok-switch 0.4.1 - https://github.com/enderzcx/grok-bot-switch
 // Single-file build. Do not edit; regenerate with `node build.mjs`.
 "use strict";
 // GROK_SWITCH_PAYLOAD_BEGIN
@@ -129,6 +129,10 @@ function providerStateEvent(protocolId, items) {
   };
 }
 
+// Opaque reasoning state we previously recorded for this protocol. State that
+// is absent, empty, or belongs to another protocol (the conversation moved
+// between providers) yields null: the adapter then replays the message without
+// reasoning items, which every provider accepts. Malformed state still throws.
 function readMessageProviderState(message, protocolId) {
   if (message == null || message.providerState == null) {
     return null;
@@ -141,10 +145,7 @@ function readMessageProviderState(message, protocolId) {
     });
   }
   if (state.protocol !== protocolId) {
-    throw protocolError("providerState protocol does not match adapter", {
-      protocol: protocolId,
-      code: "unsupported-shape"
-    });
+    return null;
   }
   if (!Array.isArray(state.items)) {
     throw protocolError("providerState items must be an array", {
@@ -158,20 +159,13 @@ function readMessageProviderState(message, protocolId) {
   return state;
 }
 
-function requireContinuationState(message, payload, protocolId) {
+function continuationState(message, payload, protocolId) {
   var state = readMessageProviderState(message, protocolId);
   var hasReasoning = payload != null && typeof payload.reasoning === "string" && payload.reasoning.length > 0;
-  if (hasReasoning && state == null) {
-    throw protocolError("Reasoning continuation requires providerState", {
-      protocol: protocolId,
-      code: "unsupported-shape"
-    });
-  }
+  // State without visible reasoning means the host dropped the reasoning
+  // text; replaying the state alone would desynchronise the transcript.
   if (state != null && !hasReasoning) {
-    throw protocolError("providerState requires matching visible reasoning", {
-      protocol: protocolId,
-      code: "unsupported-shape"
-    });
+    return null;
   }
   return state;
 }
@@ -472,7 +466,7 @@ module.exports = {
   resolveEndpointPath: resolveEndpointPath,
   providerStateEvent: providerStateEvent,
   readMessageProviderState: readMessageProviderState,
-  requireContinuationState: requireContinuationState,
+  continuationState: continuationState,
   assertBoundReasoning: assertBoundReasoning,
   jsonHeaders: jsonHeaders,
   mapFinishReason: mapFinishReason,
@@ -814,6 +808,10 @@ function imageUrlFromPart(part, protocolId) {
     if (image.length === 0) {
       throw unsupported(protocolId, "Image content is unrepresentable");
     }
+    // The host emits bare base64 when the attachment had no mime type.
+    if (!/^(data:|https?:\/\/)/i.test(image)) {
+      return "data:" + mime + ";base64," + image;
+    }
     return image;
   }
   if (typeof URL !== "undefined" && image instanceof URL) {
@@ -833,6 +831,16 @@ function extractSystemText(message, protocolId) {
     return message.content;
   }
   throw unsupported(protocolId, "System content is unrepresentable");
+}
+
+// History compatibility policy: conversation history produced by another
+// provider (usually official Grok) may contain parts no external protocol can
+// carry. Those are degraded to a short text placeholder or dropped so the turn
+// can proceed; genuinely malformed parts still throw.
+function filePlaceholder(part) {
+  var name = typeof part.filename === "string" && part.filename.length > 0 ? part.filename : "file";
+  var mime = typeof part.mimeType === "string" && part.mimeType.length > 0 ? " (" + part.mimeType + ")" : "";
+  return "[Attached file omitted: " + name + mime + "]";
 }
 
 function extractUserParts(message, protocolId) {
@@ -855,6 +863,8 @@ function extractUserParts(message, protocolId) {
       parts.push({ kind: "text", text: part.text });
     } else if (part.type === "image" || part.type === "image_url") {
       parts.push({ kind: "image", url: imageUrlFromPart(part, protocolId) });
+    } else if (part.type === "file") {
+      parts.push({ kind: "text", text: filePlaceholder(part) });
     } else {
       throw unsupported(protocolId, "User content is unrepresentable");
     }
@@ -931,6 +941,10 @@ function extractAssistantPayload(message, protocolId) {
         reasonings.push(part.text);
       } else if (part.type === "tool-call" || part.type === "tool_call") {
         toolCalls.push(hostToolCall(part, protocolId));
+      } else if (part.type === "redacted-reasoning" || part.type === "file") {
+        // Opaque reasoning from another provider cannot be replayed anywhere;
+        // assistant file outputs have no equivalent in these protocols.
+        continue;
       } else {
         throw unsupported(protocolId, "Assistant content is unrepresentable");
       }
@@ -941,24 +955,40 @@ function extractAssistantPayload(message, protocolId) {
   return {
     text: texts.join(""),
     reasoning: reasonings.join(""),
-    toolCalls: toolCalls
+    toolCalls: toolCalls,
+    isEmpty: texts.join("").length === 0 && reasonings.join("").length === 0 && toolCalls.length === 0
   };
 }
 
-function rejectUnrepresentableToolResultExtras(part, protocolId) {
-  var extras = part.experimental_content || part.content;
+// Splits a tool result's rich content (host `content` or `experimental_content`)
+// into text and image data URLs. Any other item type is unrepresentable.
+function toolResultRichParts(part, protocolId) {
+  var extras = Array.isArray(part.experimental_content) ? part.experimental_content : part.content;
+  var texts = [];
+  var images = [];
   if (!Array.isArray(extras)) {
-    return;
+    return { texts: texts, images: images };
   }
   for (var i = 0; i < extras.length; i += 1) {
     var item = extras[i];
-    if (item != null && typeof item === "object" && item.type != null && item.type !== "text") {
+    if (item == null || typeof item !== "object") {
+      throw unsupported(protocolId, "Tool result content is unrepresentable");
+    }
+    if (item.type === "text" && typeof item.text === "string") {
+      texts.push(item.text);
+    } else if (item.type === "image" && typeof item.data === "string" && item.data.length > 0) {
+      var mime = typeof item.mimeType === "string" && item.mimeType.length > 0 ? item.mimeType : "image/png";
+      images.push(item.data.indexOf("data:") === 0 ? item.data : "data:" + mime + ";base64," + item.data);
+    } else if (item.type === "image" || item.type === "image_url") {
+      images.push(imageUrlFromPart(item, protocolId));
+    } else {
       throw unsupported(protocolId, "Tool result content is unrepresentable");
     }
   }
+  return { texts: texts, images: images };
 }
 
-function toolResultContent(part, protocolId) {
+function toolResultContent(part, rich, protocolId) {
   if (typeof part.result === "string") {
     return part.result;
   }
@@ -972,23 +1002,14 @@ function toolResultContent(part, protocolId) {
   if (typeof part.content === "string") {
     return part.content;
   }
-  if (Array.isArray(part.content)) {
-    var texts = [];
-    for (var i = 0; i < part.content.length; i += 1) {
-      var item = part.content[i];
-      if (item == null || typeof item !== "object" || item.type !== "text" || typeof item.text !== "string") {
-        throw unsupported(protocolId, "Tool result content is unrepresentable");
-      }
-      texts.push(item.text);
-    }
-    return texts.join("");
-  }
-  return "";
+  return rich.texts.join("");
 }
 
+// Returns [{ id, name, content, images }] where images are data/HTTP URLs of
+// image outputs the tool produced (screenshots etc.).
 function extractToolResults(message, protocolId) {
   if (typeof message.tool_call_id === "string" && message.tool_call_id.length > 0 && (typeof message.content === "string" || message.content == null)) {
-    return [{ id: message.tool_call_id, content: message.content == null ? "" : message.content }];
+    return [{ id: message.tool_call_id, name: message.name, content: message.content == null ? "" : message.content, images: [] }];
   }
   if (!Array.isArray(message.content)) {
     throw unsupported(protocolId, "Tool content is unrepresentable");
@@ -1006,10 +1027,30 @@ function extractToolResults(message, protocolId) {
         code: "incomplete-tool-call"
       });
     }
-    rejectUnrepresentableToolResultExtras(part, protocolId);
-    out.push({ id: id, content: toolResultContent(part, protocolId) });
+    var rich = toolResultRichParts(part, protocolId);
+    out.push({
+      id: id,
+      name: typeof part.toolName === "string" ? part.toolName : part.tool_name,
+      content: toolResultContent(part, rich, protocolId),
+      images: rich.images
+    });
   }
   return out;
+}
+
+// For protocols whose tool-result slot is text-only, image outputs are carried
+// by a user message that immediately follows the tool results.
+function toolImagesUserParts(results) {
+  var parts = [];
+  for (var i = 0; i < results.length; i += 1) {
+    if (results[i].images.length === 0) continue;
+    var label = results[i].name ? results[i].name : results[i].id;
+    parts.push({ kind: "text", text: "[Image output of tool " + label + "]" });
+    for (var j = 0; j < results[i].images.length; j += 1) {
+      parts.push({ kind: "image", url: results[i].images[j] });
+    }
+  }
+  return parts;
 }
 
 module.exports = {
@@ -1020,6 +1061,7 @@ module.exports = {
   extractUserParts: extractUserParts,
   extractAssistantPayload: extractAssistantPayload,
   extractToolResults: extractToolResults,
+  toolImagesUserParts: toolImagesUserParts,
   unsupported: unsupported
 };
 });
@@ -1049,9 +1091,12 @@ function toOpenAiMessages(messages) {
     if (role === "system") {
       out.push({ role: "system", content: tools.extractSystemText(message, PROTOCOL_ID) });
     } else if (role === "user") {
-      out.push({ role: "user", content: userContent(message) });
+      out.push({ role: "user", content: userContentFromParts(tools.extractUserParts(message, PROTOCOL_ID)) });
     } else if (role === "assistant") {
-      out.push(assistantMessage(message));
+      var assistant = assistantMessage(message);
+      if (assistant != null) {
+        out.push(assistant);
+      }
     } else if (role === "tool") {
       var toolMessages = tools.extractToolResults(message, PROTOCOL_ID);
       for (var j = 0; j < toolMessages.length; j += 1) {
@@ -1061,6 +1106,10 @@ function toOpenAiMessages(messages) {
           content: toolMessages[j].content
         });
       }
+      var imageParts = tools.toolImagesUserParts(toolMessages);
+      if (imageParts.length > 0) {
+        out.push({ role: "user", content: userContentFromParts(imageParts) });
+      }
     } else {
       throw tools.unsupported(PROTOCOL_ID, "OpenAI Chat message role is unrepresentable");
     }
@@ -1068,8 +1117,7 @@ function toOpenAiMessages(messages) {
   return out;
 }
 
-function userContent(message) {
-  var parts = tools.extractUserParts(message, PROTOCOL_ID);
+function userContentFromParts(parts) {
   if (parts.length === 0) {
     return "";
   }
@@ -1091,13 +1139,16 @@ function userContent(message) {
 
 function assistantMessage(message) {
   var payload = tools.extractAssistantPayload(message, PROTOCOL_ID);
+  // Chat Completions is stateless: prior reasoning is never replayed. OpenAI
+  // rejects unknown message fields and DeepSeek returns 400 when
+  // reasoning_content is echoed back, so only text and tool calls go out.
+  if (payload.text.length === 0 && payload.toolCalls.length === 0) {
+    return null;
+  }
   var result = {
     role: "assistant",
     content: payload.text.length === 0 ? null : payload.text
   };
-  if (payload.reasoning.length > 0) {
-    result.reasoning_content = payload.reasoning;
-  }
   if (payload.toolCalls.length > 0) {
     result.tool_calls = [];
     for (var i = 0; i < payload.toolCalls.length; i += 1) {
@@ -1675,7 +1726,7 @@ function toResponsesInput(messages) {
       input.push(userMessage(tools.extractUserParts(message, PROTOCOL_ID)));
     } else if (role === "assistant") {
       var payload = tools.extractAssistantPayload(message, PROTOCOL_ID);
-      var providerState = contract.requireContinuationState(message, payload, PROTOCOL_ID);
+      var providerState = contract.continuationState(message, payload, PROTOCOL_ID);
       if (providerState != null) {
         var reasoningItems = [];
         for (var s = 0; s < providerState.items.length; s += 1) {
@@ -1705,6 +1756,10 @@ function toResponsesInput(messages) {
           call_id: results[r].id,
           output: results[r].content
         });
+      }
+      var imageParts = tools.toolImagesUserParts(results);
+      if (imageParts.length > 0) {
+        input.push(userMessage(imageParts));
       }
     } else {
       throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses message role is unrepresentable");
@@ -2333,7 +2388,10 @@ function derivedAnthropicThinkingText(items) {
 
 function assistantContent(message) {
   var payload = tools.extractAssistantPayload(message, PROTOCOL_ID);
-  var providerState = contract.requireContinuationState(message, payload, PROTOCOL_ID);
+  if (payload.isEmpty) {
+    return null;
+  }
+  var providerState = contract.continuationState(message, payload, PROTOCOL_ID);
   var content = [];
   if (providerState != null) {
     var thinkingItems = [];
@@ -2356,10 +2414,22 @@ function assistantContent(message) {
       input: tools.parseToolArgumentsObject(payload.toolCalls[t].arguments, PROTOCOL_ID)
     });
   }
-  if (content.length === 0) {
-    throw tools.unsupported(PROTOCOL_ID, "Anthropic assistant content is unrepresentable");
-  }
   return content;
+}
+
+// Anthropic tool_result content accepts text and image blocks directly.
+function toolResultBlocks(result) {
+  if (result.images.length === 0) {
+    return result.content;
+  }
+  var blocks = [];
+  if (result.content.length > 0) {
+    blocks.push({ type: "text", text: result.content });
+  }
+  for (var i = 0; i < result.images.length; i += 1) {
+    blocks.push(imagePart(result.images[i]));
+  }
+  return blocks;
 }
 
 function toAnthropicMessages(messages) {
@@ -2382,10 +2452,10 @@ function toAnthropicMessages(messages) {
     } else if (role === "user") {
       appendUser(out, userContentFromParts(tools.extractUserParts(message, PROTOCOL_ID)));
     } else if (role === "assistant") {
-      out.push({
-        role: "assistant",
-        content: assistantContent(message)
-      });
+      var content = assistantContent(message);
+      if (content != null) {
+        out.push({ role: "assistant", content: content });
+      }
     } else if (role === "tool") {
       var results = tools.extractToolResults(message, PROTOCOL_ID);
       var toolParts = [];
@@ -2393,7 +2463,7 @@ function toAnthropicMessages(messages) {
         toolParts.push({
           type: "tool_result",
           tool_use_id: results[r].id,
-          content: results[r].content
+          content: toolResultBlocks(results[r])
         });
       }
       appendUser(out, toolParts);
@@ -3785,7 +3855,7 @@ var cliFs = require("node:fs");
 var cliPath = require("node:path");
 var cliChildProcess = require("node:child_process");
 
-var CLI_VERSION = "0.4.0";
+var CLI_VERSION = "0.4.1";
 var CLI_HOST_PATH = process.env.GROK_SWITCH_HOST || "/home/box/sand-host/host-main.cjs";
 var CLI_HOST_VERSION_PATH = cliPath.join(cliPath.dirname(CLI_HOST_PATH), "version");
 var CLI_BACKUP_PATH = CLI_HOST_PATH + ".grok-switch.orig";

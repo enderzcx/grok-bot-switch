@@ -108,6 +108,10 @@ function providerStateEvent(protocolId, items) {
   };
 }
 
+// Opaque reasoning state we previously recorded for this protocol. State that
+// is absent, empty, or belongs to another protocol (the conversation moved
+// between providers) yields null: the adapter then replays the message without
+// reasoning items, which every provider accepts. Malformed state still throws.
 function readMessageProviderState(message, protocolId) {
   if (message == null || message.providerState == null) {
     return null;
@@ -120,10 +124,7 @@ function readMessageProviderState(message, protocolId) {
     });
   }
   if (state.protocol !== protocolId) {
-    throw protocolError("providerState protocol does not match adapter", {
-      protocol: protocolId,
-      code: "unsupported-shape"
-    });
+    return null;
   }
   if (!Array.isArray(state.items)) {
     throw protocolError("providerState items must be an array", {
@@ -137,20 +138,13 @@ function readMessageProviderState(message, protocolId) {
   return state;
 }
 
-function requireContinuationState(message, payload, protocolId) {
+function continuationState(message, payload, protocolId) {
   var state = readMessageProviderState(message, protocolId);
   var hasReasoning = payload != null && typeof payload.reasoning === "string" && payload.reasoning.length > 0;
-  if (hasReasoning && state == null) {
-    throw protocolError("Reasoning continuation requires providerState", {
-      protocol: protocolId,
-      code: "unsupported-shape"
-    });
-  }
+  // State without visible reasoning means the host dropped the reasoning
+  // text; replaying the state alone would desynchronise the transcript.
   if (state != null && !hasReasoning) {
-    throw protocolError("providerState requires matching visible reasoning", {
-      protocol: protocolId,
-      code: "unsupported-shape"
-    });
+    return null;
   }
   return state;
 }
@@ -451,7 +445,7 @@ module.exports = {
   resolveEndpointPath: resolveEndpointPath,
   providerStateEvent: providerStateEvent,
   readMessageProviderState: readMessageProviderState,
-  requireContinuationState: requireContinuationState,
+  continuationState: continuationState,
   assertBoundReasoning: assertBoundReasoning,
   jsonHeaders: jsonHeaders,
   mapFinishReason: mapFinishReason,

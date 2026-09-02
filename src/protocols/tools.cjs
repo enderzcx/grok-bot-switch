@@ -142,6 +142,10 @@ function imageUrlFromPart(part, protocolId) {
     if (image.length === 0) {
       throw unsupported(protocolId, "Image content is unrepresentable");
     }
+    // The host emits bare base64 when the attachment had no mime type.
+    if (!/^(data:|https?:\/\/)/i.test(image)) {
+      return "data:" + mime + ";base64," + image;
+    }
     return image;
   }
   if (typeof URL !== "undefined" && image instanceof URL) {
@@ -161,6 +165,16 @@ function extractSystemText(message, protocolId) {
     return message.content;
   }
   throw unsupported(protocolId, "System content is unrepresentable");
+}
+
+// History compatibility policy: conversation history produced by another
+// provider (usually official Grok) may contain parts no external protocol can
+// carry. Those are degraded to a short text placeholder or dropped so the turn
+// can proceed; genuinely malformed parts still throw.
+function filePlaceholder(part) {
+  var name = typeof part.filename === "string" && part.filename.length > 0 ? part.filename : "file";
+  var mime = typeof part.mimeType === "string" && part.mimeType.length > 0 ? " (" + part.mimeType + ")" : "";
+  return "[Attached file omitted: " + name + mime + "]";
 }
 
 function extractUserParts(message, protocolId) {
@@ -183,6 +197,8 @@ function extractUserParts(message, protocolId) {
       parts.push({ kind: "text", text: part.text });
     } else if (part.type === "image" || part.type === "image_url") {
       parts.push({ kind: "image", url: imageUrlFromPart(part, protocolId) });
+    } else if (part.type === "file") {
+      parts.push({ kind: "text", text: filePlaceholder(part) });
     } else {
       throw unsupported(protocolId, "User content is unrepresentable");
     }
@@ -259,6 +275,10 @@ function extractAssistantPayload(message, protocolId) {
         reasonings.push(part.text);
       } else if (part.type === "tool-call" || part.type === "tool_call") {
         toolCalls.push(hostToolCall(part, protocolId));
+      } else if (part.type === "redacted-reasoning" || part.type === "file") {
+        // Opaque reasoning from another provider cannot be replayed anywhere;
+        // assistant file outputs have no equivalent in these protocols.
+        continue;
       } else {
         throw unsupported(protocolId, "Assistant content is unrepresentable");
       }
@@ -269,24 +289,40 @@ function extractAssistantPayload(message, protocolId) {
   return {
     text: texts.join(""),
     reasoning: reasonings.join(""),
-    toolCalls: toolCalls
+    toolCalls: toolCalls,
+    isEmpty: texts.join("").length === 0 && reasonings.join("").length === 0 && toolCalls.length === 0
   };
 }
 
-function rejectUnrepresentableToolResultExtras(part, protocolId) {
-  var extras = part.experimental_content || part.content;
+// Splits a tool result's rich content (host `content` or `experimental_content`)
+// into text and image data URLs. Any other item type is unrepresentable.
+function toolResultRichParts(part, protocolId) {
+  var extras = Array.isArray(part.experimental_content) ? part.experimental_content : part.content;
+  var texts = [];
+  var images = [];
   if (!Array.isArray(extras)) {
-    return;
+    return { texts: texts, images: images };
   }
   for (var i = 0; i < extras.length; i += 1) {
     var item = extras[i];
-    if (item != null && typeof item === "object" && item.type != null && item.type !== "text") {
+    if (item == null || typeof item !== "object") {
+      throw unsupported(protocolId, "Tool result content is unrepresentable");
+    }
+    if (item.type === "text" && typeof item.text === "string") {
+      texts.push(item.text);
+    } else if (item.type === "image" && typeof item.data === "string" && item.data.length > 0) {
+      var mime = typeof item.mimeType === "string" && item.mimeType.length > 0 ? item.mimeType : "image/png";
+      images.push(item.data.indexOf("data:") === 0 ? item.data : "data:" + mime + ";base64," + item.data);
+    } else if (item.type === "image" || item.type === "image_url") {
+      images.push(imageUrlFromPart(item, protocolId));
+    } else {
       throw unsupported(protocolId, "Tool result content is unrepresentable");
     }
   }
+  return { texts: texts, images: images };
 }
 
-function toolResultContent(part, protocolId) {
+function toolResultContent(part, rich, protocolId) {
   if (typeof part.result === "string") {
     return part.result;
   }
@@ -300,23 +336,14 @@ function toolResultContent(part, protocolId) {
   if (typeof part.content === "string") {
     return part.content;
   }
-  if (Array.isArray(part.content)) {
-    var texts = [];
-    for (var i = 0; i < part.content.length; i += 1) {
-      var item = part.content[i];
-      if (item == null || typeof item !== "object" || item.type !== "text" || typeof item.text !== "string") {
-        throw unsupported(protocolId, "Tool result content is unrepresentable");
-      }
-      texts.push(item.text);
-    }
-    return texts.join("");
-  }
-  return "";
+  return rich.texts.join("");
 }
 
+// Returns [{ id, name, content, images }] where images are data/HTTP URLs of
+// image outputs the tool produced (screenshots etc.).
 function extractToolResults(message, protocolId) {
   if (typeof message.tool_call_id === "string" && message.tool_call_id.length > 0 && (typeof message.content === "string" || message.content == null)) {
-    return [{ id: message.tool_call_id, content: message.content == null ? "" : message.content }];
+    return [{ id: message.tool_call_id, name: message.name, content: message.content == null ? "" : message.content, images: [] }];
   }
   if (!Array.isArray(message.content)) {
     throw unsupported(protocolId, "Tool content is unrepresentable");
@@ -334,10 +361,30 @@ function extractToolResults(message, protocolId) {
         code: "incomplete-tool-call"
       });
     }
-    rejectUnrepresentableToolResultExtras(part, protocolId);
-    out.push({ id: id, content: toolResultContent(part, protocolId) });
+    var rich = toolResultRichParts(part, protocolId);
+    out.push({
+      id: id,
+      name: typeof part.toolName === "string" ? part.toolName : part.tool_name,
+      content: toolResultContent(part, rich, protocolId),
+      images: rich.images
+    });
   }
   return out;
+}
+
+// For protocols whose tool-result slot is text-only, image outputs are carried
+// by a user message that immediately follows the tool results.
+function toolImagesUserParts(results) {
+  var parts = [];
+  for (var i = 0; i < results.length; i += 1) {
+    if (results[i].images.length === 0) continue;
+    var label = results[i].name ? results[i].name : results[i].id;
+    parts.push({ kind: "text", text: "[Image output of tool " + label + "]" });
+    for (var j = 0; j < results[i].images.length; j += 1) {
+      parts.push({ kind: "image", url: results[i].images[j] });
+    }
+  }
+  return parts;
 }
 
 module.exports = {
@@ -348,5 +395,6 @@ module.exports = {
   extractUserParts: extractUserParts,
   extractAssistantPayload: extractAssistantPayload,
   extractToolResults: extractToolResults,
+  toolImagesUserParts: toolImagesUserParts,
   unsupported: unsupported
 };

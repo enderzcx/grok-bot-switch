@@ -108,7 +108,7 @@ function toResponsesInput(messages) {
       input.push(userMessage(tools.extractUserParts(message, PROTOCOL_ID)));
     } else if (role === "assistant") {
       var payload = tools.extractAssistantPayload(message, PROTOCOL_ID);
-      var providerState = contract.requireContinuationState(message, payload, PROTOCOL_ID);
+      var providerState = contract.continuationState(message, payload, PROTOCOL_ID);
       if (providerState != null) {
         var reasoningItems = [];
         for (var s = 0; s < providerState.items.length; s += 1) {
@@ -138,6 +138,10 @@ function toResponsesInput(messages) {
           call_id: results[r].id,
           output: results[r].content
         });
+      }
+      var imageParts = tools.toolImagesUserParts(results);
+      if (imageParts.length > 0) {
+        input.push(userMessage(imageParts));
       }
     } else {
       throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses message role is unrepresentable");

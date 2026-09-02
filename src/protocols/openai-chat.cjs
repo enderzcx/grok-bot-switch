@@ -23,9 +23,12 @@ function toOpenAiMessages(messages) {
     if (role === "system") {
       out.push({ role: "system", content: tools.extractSystemText(message, PROTOCOL_ID) });
     } else if (role === "user") {
-      out.push({ role: "user", content: userContent(message) });
+      out.push({ role: "user", content: userContentFromParts(tools.extractUserParts(message, PROTOCOL_ID)) });
     } else if (role === "assistant") {
-      out.push(assistantMessage(message));
+      var assistant = assistantMessage(message);
+      if (assistant != null) {
+        out.push(assistant);
+      }
     } else if (role === "tool") {
       var toolMessages = tools.extractToolResults(message, PROTOCOL_ID);
       for (var j = 0; j < toolMessages.length; j += 1) {
@@ -35,6 +38,10 @@ function toOpenAiMessages(messages) {
           content: toolMessages[j].content
         });
       }
+      var imageParts = tools.toolImagesUserParts(toolMessages);
+      if (imageParts.length > 0) {
+        out.push({ role: "user", content: userContentFromParts(imageParts) });
+      }
     } else {
       throw tools.unsupported(PROTOCOL_ID, "OpenAI Chat message role is unrepresentable");
     }
@@ -42,8 +49,7 @@ function toOpenAiMessages(messages) {
   return out;
 }
 
-function userContent(message) {
-  var parts = tools.extractUserParts(message, PROTOCOL_ID);
+function userContentFromParts(parts) {
   if (parts.length === 0) {
     return "";
   }
@@ -65,13 +71,16 @@ function userContent(message) {
 
 function assistantMessage(message) {
   var payload = tools.extractAssistantPayload(message, PROTOCOL_ID);
+  // Chat Completions is stateless: prior reasoning is never replayed. OpenAI
+  // rejects unknown message fields and DeepSeek returns 400 when
+  // reasoning_content is echoed back, so only text and tool calls go out.
+  if (payload.text.length === 0 && payload.toolCalls.length === 0) {
+    return null;
+  }
   var result = {
     role: "assistant",
     content: payload.text.length === 0 ? null : payload.text
   };
-  if (payload.reasoning.length > 0) {
-    result.reasoning_content = payload.reasoning;
-  }
   if (payload.toolCalls.length > 0) {
     result.tool_calls = [];
     for (var i = 0; i < payload.toolCalls.length; i += 1) {

@@ -90,7 +90,10 @@ function derivedAnthropicThinkingText(items) {
 
 function assistantContent(message) {
   var payload = tools.extractAssistantPayload(message, PROTOCOL_ID);
-  var providerState = contract.requireContinuationState(message, payload, PROTOCOL_ID);
+  if (payload.isEmpty) {
+    return null;
+  }
+  var providerState = contract.continuationState(message, payload, PROTOCOL_ID);
   var content = [];
   if (providerState != null) {
     var thinkingItems = [];
@@ -113,10 +116,22 @@ function assistantContent(message) {
       input: tools.parseToolArgumentsObject(payload.toolCalls[t].arguments, PROTOCOL_ID)
     });
   }
-  if (content.length === 0) {
-    throw tools.unsupported(PROTOCOL_ID, "Anthropic assistant content is unrepresentable");
-  }
   return content;
+}
+
+// Anthropic tool_result content accepts text and image blocks directly.
+function toolResultBlocks(result) {
+  if (result.images.length === 0) {
+    return result.content;
+  }
+  var blocks = [];
+  if (result.content.length > 0) {
+    blocks.push({ type: "text", text: result.content });
+  }
+  for (var i = 0; i < result.images.length; i += 1) {
+    blocks.push(imagePart(result.images[i]));
+  }
+  return blocks;
 }
 
 function toAnthropicMessages(messages) {
@@ -139,10 +154,10 @@ function toAnthropicMessages(messages) {
     } else if (role === "user") {
       appendUser(out, userContentFromParts(tools.extractUserParts(message, PROTOCOL_ID)));
     } else if (role === "assistant") {
-      out.push({
-        role: "assistant",
-        content: assistantContent(message)
-      });
+      var content = assistantContent(message);
+      if (content != null) {
+        out.push({ role: "assistant", content: content });
+      }
     } else if (role === "tool") {
       var results = tools.extractToolResults(message, PROTOCOL_ID);
       var toolParts = [];
@@ -150,7 +165,7 @@ function toAnthropicMessages(messages) {
         toolParts.push({
           type: "tool_result",
           tool_use_id: results[r].id,
-          content: results[r].content
+          content: toolResultBlocks(results[r])
         });
       }
       appendUser(out, toolParts);
