@@ -29,7 +29,7 @@ var CLI_USAGE = [
   "",
   "usage: node grok-switch.cjs <command> [options]",
   "",
-  "  use <name> [provider options]   switch to a saved provider (saves it first if options given)",
+  "  use <name> [provider options]   switch to a saved provider (saves and test-requests it first if options given)",
   "  official                        switch back to official Grok; saved providers are kept",
   "  add <name> <provider options>   save or update a provider without switching",
   "  remove <name>                   delete a saved provider",
@@ -45,11 +45,16 @@ var CLI_USAGE = [
   "  --model <id>                    model id sent to the provider (required)",
   "  --protocol <p>                  openai-chat (default) | openai-responses | anthropic-messages",
   "  --key <apiKey>                  API key; or --key-file <path>; or env GROK_SWITCH_API_KEY",
-  "  --auth <type>                   bearer | x-api-key | none (default depends on protocol)",
+  "  --auth <type>                   bearer | x-api-key | none | codex (default depends on protocol)",
+  "                                  codex = sign with the ChatGPT login from `codex login` (~/.codex/auth.json);",
+  "                                  implies openai-responses and " + GROK_SWITCH_CODEX_BASE_URL,
   "  --endpoint <path>               override the request path, e.g. /v1/chat/completions",
   "  --header <Name: value>          extra request header (repeatable)",
   "  --reasoning <effort>            reasoningEffort parameter (OpenAI protocols)",
   "  --max-tokens <n>                maxTokens parameter (Anthropic default 8192)",
+  "  --no-test                       skip the test request `use` sends before switching",
+  "",
+  "in chat (any platform, no terminal): /gs use <name>   /gs official   /gs status",
   "",
   "files: " + CLI_CONFIG_PATH + " (config, mode 600), " + CLI_LOG_PATH + " (request log)",
   "host:  " + CLI_HOST_PATH
@@ -71,7 +76,7 @@ function cliParseArgs(argv) {
     var value;
     if (eq !== -1) {
       value = arg.slice(eq + 1);
-    } else if (name === "json" || name === "force") {
+    } else if (name === "json" || name === "force" || name === "no-test") {
       value = true;
     } else {
       if (i + 1 >= argv.length) throw new CliError("--" + name + " needs a value");
@@ -140,15 +145,29 @@ function cliReadKey(flags) {
 
 // Builds the raw provider entry from flags, merging over an existing entry so
 // `use name --model x` can change one field.
+// Model named in the Codex CLI config, used as the default for --auth codex.
+function cliCodexConfiguredModel() {
+  try {
+    var home = process.env.CODEX_HOME && process.env.CODEX_HOME.trim() ? process.env.CODEX_HOME.trim() : require("node:os").homedir() + "/.codex";
+    var match = /^\s*model\s*=\s*["']([^"']+)["']/m.exec(cliFs.readFileSync(home + "/config.toml", "utf8"));
+    return match ? match[1].trim() : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
 function cliProviderFromFlags(name, flags, existing) {
   var entry = existing != null ? JSON.parse(JSON.stringify(existing)) : {};
+  if (flags.auth != null) entry.authType = String(flags.auth);
+  var codex = entry.authType === "codex";
   if (flags.protocol != null) entry.protocol = String(flags.protocol);
-  if (entry.protocol == null) entry.protocol = "openai-chat";
+  if (entry.protocol == null) entry.protocol = codex ? "openai-responses" : "openai-chat";
   if (flags.url != null) entry.baseUrl = String(flags.url);
+  if (entry.baseUrl == null && codex) entry.baseUrl = GROK_SWITCH_CODEX_BASE_URL;
   if (flags.model != null) entry.model = String(flags.model);
+  if (entry.model == null && codex) entry.model = cliCodexConfiguredModel();
   var key = cliReadKey(flags);
   if (key != null) entry.apiKey = key;
-  if (flags.auth != null) entry.authType = String(flags.auth);
   if (flags.endpoint != null) entry.endpointPath = String(flags.endpoint);
   if (flags.header != null) {
     entry.headers = entry.headers || {};
@@ -169,7 +188,14 @@ function cliProviderFromFlags(name, flags, existing) {
     }
   }
   if (entry.baseUrl == null) throw new CliError("--url is required");
-  if (entry.model == null) throw new CliError("--model is required");
+  if (entry.model == null) throw new CliError(codex ? "--model is required (no model in ~/.codex/config.toml)" : "--model is required");
+  if (codex) {
+    try {
+      grokSwitchCodexCredentials();
+    } catch (error) {
+      throw new CliError(error.message);
+    }
+  }
   try {
     grokSwitchNormalizeProvider(name, entry);
   } catch (error) {
@@ -470,10 +496,11 @@ function cliExplainRestart(result) {
   }
 }
 
-function cliCommandUse(args) {
+async function cliCommandUse(args) {
   var name = cliRequireProviderName(args.positional[1]);
   var config = cliReadRawConfig();
-  if (cliHasProviderFlags(args.flags)) {
+  var changed = cliHasProviderFlags(args.flags);
+  if (changed) {
     config.providers[name] = cliProviderFromFlags(name, args.flags, config.providers[name]);
   }
   if (config.providers[name] == null) {
@@ -484,6 +511,15 @@ function cliCommandUse(args) {
     provider = grokSwitchNormalizeProvider(name, config.providers[name]);
   } catch (error) {
     throw new CliError(error.message);
+  }
+  // A new or edited provider is probed before anything is switched, so a bad
+  // URL, key or model is reported here instead of in the next conversation.
+  if (changed && !args.flags["no-test"]) {
+    var probe = await cliProbeProvider(provider);
+    if (!probe.ok) {
+      throw new CliError("provider " + name + " did not answer a test request: " + probe.error + "\nnothing was switched; fix the flags and run again, or add --no-test to skip this check");
+    }
+    cliPrint("test request OK in " + probe.ms + "ms (reply " + JSON.stringify(probe.text.slice(0, 40)) + ")");
   }
   var outcome = cliEnsurePatched();
   config.active = name;
@@ -500,6 +536,7 @@ function cliCommandUse(args) {
   } else {
     cliPrint("takes effect on the next conversation turn; no restart needed.");
   }
+  cliPrint("in chat: /gs official switches back, /gs use <name> switches again, /gs status shows the route.");
 }
 
 function cliCommandOfficial() {
@@ -567,12 +604,14 @@ function cliCommandStatus(args) {
   var config = cliReadRawConfig();
   var route = grokSwitchResolveRoute();
   var recent = cliReadLog(5);
+  var usage = cliUsageTotals();
   if (args.flags.json) {
     var activeProvider = route.kind === "external" ? cliDescribeProvider(route.provider) : null;
     cliPrint(JSON.stringify({
       version: CLI_VERSION,
       host: host,
       config: { path: CLI_CONFIG_PATH, active: config.active, providers: Object.keys(config.providers), route: route.kind, error: route.kind === "error" ? route.message : null, activeProvider: activeProvider },
+      usage: usage,
       recentRequests: recent
     }, null, 2));
     return;
@@ -600,22 +639,22 @@ function cliCommandStatus(args) {
   if (route.kind === "external" && host.exists && !host.patched) {
     cliPrint("warning     : provider selected but host is not patched (Grok Bot update replaced the bundle?); run `use " + route.provider.name + "` to re-apply");
   }
+  var usedNames = Object.keys(usage);
+  if (usedNames.length > 0) {
+    cliPrint("usage       :");
+    for (var u = 0; u < usedNames.length; u += 1) {
+      var t = usage[usedNames[u]];
+      cliPrint("  " + usedNames[u] + "  " + t.requests + " requests" + (t.failed ? " (" + t.failed + " failed)" : "") + ", " + cliFormatTokens(t.promptTokens) + " in / " + cliFormatTokens(t.completionTokens) + " out tokens" + (t.lastUsedAt ? ", last " + t.lastUsedAt : ""));
+    }
+  }
   if (recent.length > 0) {
     cliPrint("recent      :");
     for (var i = 0; i < recent.length; i += 1) cliPrint("  " + cliFormatLogEntry(recent[i]));
   }
 }
 
-async function cliCommandTest(args) {
-  var name = cliRequireProviderName(args.positional[1]);
-  var config = cliReadRawConfig();
-  if (config.providers[name] == null) throw new CliError("no provider named " + name);
-  var provider;
-  try {
-    provider = grokSwitchNormalizeProvider(name, config.providers[name]);
-  } catch (error) {
-    throw new CliError(error.message);
-  }
+// Sends one tiny request through the same code path the host uses.
+async function cliProbeProvider(provider) {
   var startedAt = Date.now();
   var result = grokSwitchStream(provider, {
     messages: [{ role: "user", content: "Reply with exactly the word OK and nothing else." }],
@@ -632,21 +671,71 @@ async function cliCommandTest(args) {
   } catch (error) {
     failure = error;
   }
-  var ms = Date.now() - startedAt;
   var usage = null;
   try {
     usage = await result.usage;
   } catch (_error) {}
-  if (args.flags.json) {
-    cliPrint(JSON.stringify({ ok: failure == null, provider: name, ms: ms, text: text, usage: usage, error: failure ? failure.message : null }));
-  } else if (failure != null) {
-    cliPrint("FAILED after " + ms + "ms: " + failure.message);
-  } else {
-    cliPrint("OK in " + ms + "ms via " + cliDescribeProvider(provider));
-    cliPrint("reply: " + JSON.stringify(text));
-    if (usage) cliPrint("usage: " + usage.promptTokens + " prompt + " + usage.completionTokens + " completion tokens");
+  return { ok: failure == null, ms: Date.now() - startedAt, text: text, usage: usage, error: failure ? failure.message : null };
+}
+
+async function cliCommandTest(args) {
+  var name = cliRequireProviderName(args.positional[1]);
+  var config = cliReadRawConfig();
+  if (config.providers[name] == null) throw new CliError("no provider named " + name);
+  var provider;
+  try {
+    provider = grokSwitchNormalizeProvider(name, config.providers[name]);
+  } catch (error) {
+    throw new CliError(error.message);
   }
-  if (failure != null) process.exitCode = 1;
+  var probe = await cliProbeProvider(provider);
+  if (args.flags.json) {
+    cliPrint(JSON.stringify(Object.assign({ provider: name }, probe)));
+  } else if (!probe.ok) {
+    cliPrint("FAILED after " + probe.ms + "ms: " + probe.error);
+  } else {
+    cliPrint("OK in " + probe.ms + "ms via " + cliDescribeProvider(provider));
+    cliPrint("reply: " + JSON.stringify(probe.text));
+    if (probe.usage) cliPrint("usage: " + probe.usage.promptTokens + " prompt + " + probe.usage.completionTokens + " completion tokens");
+  }
+  if (!probe.ok) process.exitCode = 1;
+}
+
+// Per-provider totals from the request log (current file plus one rotation).
+function cliUsageTotals() {
+  var totals = {};
+  var files = [CLI_LOG_PATH + ".1", CLI_LOG_PATH];
+  for (var f = 0; f < files.length; f += 1) {
+    var lines;
+    try {
+      lines = cliFs.readFileSync(files[f], "utf8").split("\n");
+    } catch (_error) {
+      continue;
+    }
+    for (var i = 0; i < lines.length; i += 1) {
+      if (!lines[i]) continue;
+      var entry;
+      try {
+        entry = JSON.parse(lines[i]);
+      } catch (_parse) {
+        continue;
+      }
+      if (typeof entry.provider !== "string") continue;
+      var t = totals[entry.provider] || (totals[entry.provider] = { requests: 0, failed: 0, promptTokens: 0, completionTokens: 0, lastUsedAt: null });
+      t.requests += 1;
+      if (entry.error) t.failed += 1;
+      if (entry.usage) {
+        t.promptTokens += Number(entry.usage.promptTokens) || 0;
+        t.completionTokens += Number(entry.usage.completionTokens) || 0;
+      }
+      if (entry.ts && (t.lastUsedAt == null || entry.ts > t.lastUsedAt)) t.lastUsedAt = entry.ts;
+    }
+  }
+  return totals;
+}
+
+function cliFormatTokens(n) {
+  return n >= 1000000 ? (n / 1000000).toFixed(1) + "M" : n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 }
 
 async function cliMain(argv) {

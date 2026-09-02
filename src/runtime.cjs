@@ -13,7 +13,14 @@ var GROK_SWITCH_CONFIG_PATH = GROK_SWITCH_DIR + "/config.json";
 var GROK_SWITCH_LOG_PATH = GROK_SWITCH_DIR + "/requests.log";
 var GROK_SWITCH_LOG_MAX_BYTES = 1024 * 1024;
 var GROK_SWITCH_PROTOCOLS = ["openai-chat", "openai-responses", "anthropic-messages"];
-var GROK_SWITCH_AUTH_TYPES = ["bearer", "x-api-key", "none"];
+// "codex" signs requests with the ChatGPT login stored by the Codex CLI
+// (~/.codex/auth.json) instead of an API key.
+var GROK_SWITCH_AUTH_TYPES = ["bearer", "x-api-key", "none", "codex"];
+var GROK_SWITCH_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
+var GROK_SWITCH_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
+// Messages starting with this prefix are handled inside the host and never
+// reach a model.
+var GROK_SWITCH_COMMAND_PREFIX = /^\s*\/(?:gs|grok-switch)(?:\s+|$)/i;
 var GROK_SWITCH_DEFAULT_ANTHROPIC_MAX_TOKENS = 8192;
 var GROK_SWITCH_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 var GROK_SWITCH_MAX_SSE_EVENT_BYTES = 4 * 1024 * 1024;
@@ -94,8 +101,11 @@ function grokSwitchNormalizeProvider(name, raw) {
     throw new Error("provider " + name + ": authType must be one of " + GROK_SWITCH_AUTH_TYPES.join(", "));
   }
   var apiKey = raw.apiKey == null ? "" : String(raw.apiKey);
-  if (authType !== "none" && apiKey.trim().length === 0) {
+  if (authType !== "none" && authType !== "codex" && apiKey.trim().length === 0) {
     throw new Error("provider " + name + ": apiKey is required for authType " + authType);
+  }
+  if (authType === "codex" && protocol !== "openai-responses") {
+    throw new Error("provider " + name + ": authType codex requires protocol openai-responses");
   }
   var endpointPath = raw.endpointPath == null || raw.endpointPath === ""
     ? grokSwitchDefaultEndpointPath(protocol)
@@ -199,6 +209,209 @@ function grokSwitchResolveRoute() {
   } catch (error) {
     return { kind: "error", message: error != null && error.message ? error.message : String(error) };
   }
+}
+
+// Raw (unnormalized) config for editing. Missing file -> empty config.
+function grokSwitchReadRawConfig() {
+  var text = grokSwitchReadConfigText();
+  var parsed = text == null ? {} : JSON.parse(text);
+  if (!grokSwitchIsPlainObject(parsed)) throw new Error("config.json must be a JSON object");
+  if (!grokSwitchIsPlainObject(parsed.providers)) parsed.providers = {};
+  if (parsed.active === void 0) parsed.active = null;
+  return parsed;
+}
+
+function grokSwitchWriteConfig(config) {
+  var fs = grokSwitchFs();
+  fs.mkdirSync(GROK_SWITCH_DIR, { recursive: true, mode: 448 });
+  var tmp = GROK_SWITCH_CONFIG_PATH + "." + process.pid + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n", { mode: 384 });
+  fs.renameSync(tmp, GROK_SWITCH_CONFIG_PATH);
+}
+
+// ---------------------------------------------------------------------------
+// Codex (ChatGPT login) credentials
+
+function grokSwitchCodexAuthPath() {
+  var home = process.env.CODEX_HOME && process.env.CODEX_HOME.trim().length > 0
+    ? process.env.CODEX_HOME.trim()
+    : (process.env.HOME || require("node:os").homedir()) + "/.codex";
+  return home + "/auth.json";
+}
+
+function grokSwitchCodexCredentials() {
+  var path = grokSwitchCodexAuthPath();
+  var parsed;
+  try {
+    parsed = JSON.parse(grokSwitchFs().readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error("Codex login not found at " + path + "; run `codex login` on the cloud machine first");
+  }
+  var tokens = grokSwitchIsPlainObject(parsed) && grokSwitchIsPlainObject(parsed.tokens) ? parsed.tokens : {};
+  if (typeof tokens.access_token !== "string" || tokens.access_token.length === 0 || typeof tokens.account_id !== "string" || tokens.account_id.length === 0) {
+    throw new Error("Codex is not signed in with a ChatGPT account (" + path + "); run `codex login`");
+  }
+  return { path: path, document: parsed, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, idToken: tokens.id_token, accountId: tokens.account_id };
+}
+
+function grokSwitchJwtAudience(token) {
+  try {
+    var payload = JSON.parse(Buffer.from(String(token).split(".")[1] || "", "base64url").toString("utf8"));
+    if (typeof payload.aud === "string") return payload.aud;
+    if (Array.isArray(payload.aud)) return payload.aud.find(function (v) { return typeof v === "string"; }) || null;
+  } catch (_error) {}
+  return null;
+}
+
+async function grokSwitchCodexRefresh(current) {
+  var clientId = grokSwitchJwtAudience(current.idToken);
+  if (clientId == null || typeof current.refreshToken !== "string" || current.refreshToken.length === 0) {
+    throw new Error("Codex login expired and cannot be refreshed; run `codex login` again");
+  }
+  var response = await fetch(GROK_SWITCH_CODEX_TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: current.refreshToken, client_id: clientId }).toString()
+  });
+  if (!response.ok) throw new Error("Codex login expired and refresh failed (HTTP " + response.status + "); run `codex login` again");
+  var payload = await response.json();
+  if (typeof payload.access_token !== "string" || payload.access_token.length === 0) {
+    throw new Error("Codex refresh returned no access token; run `codex login` again");
+  }
+  var document = Object.assign({}, current.document);
+  document.tokens = Object.assign({}, current.document.tokens, {
+    access_token: payload.access_token,
+    refresh_token: typeof payload.refresh_token === "string" && payload.refresh_token.length > 0 ? payload.refresh_token : current.refreshToken,
+    id_token: typeof payload.id_token === "string" && payload.id_token.length > 0 ? payload.id_token : current.idToken
+  });
+  document.last_refresh = new Date().toISOString();
+  var fs = grokSwitchFs();
+  var tmp = current.path + "." + process.pid + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(document, null, 2) + "\n", { mode: 384 });
+  fs.renameSync(tmp, current.path);
+  return grokSwitchCodexCredentials();
+}
+
+// ---------------------------------------------------------------------------
+// Chat commands: "/gs use <name>", "/gs official", "/gs status", "/gs list".
+// Executed inside the host so the stock desktop app needs no changes.
+
+function grokSwitchLastUserText(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  var last = messages[messages.length - 1];
+  if (!grokSwitchIsPlainObject(last) || last.role !== "user") return null;
+  if (typeof last.content === "string") return last.content;
+  if (!Array.isArray(last.content)) return null;
+  var text = "";
+  for (var i = 0; i < last.content.length; i += 1) {
+    var part = last.content[i];
+    if (grokSwitchIsPlainObject(part) && part.type === "text" && typeof part.text === "string") text += part.text;
+  }
+  return text;
+}
+
+function grokSwitchDescribeProvider(provider) {
+  return provider.protocol + " · " + provider.baseUrl + provider.endpointPath + " · model `" + provider.model + "`";
+}
+
+function grokSwitchCommandReply(text) {
+  var command = text.replace(GROK_SWITCH_COMMAND_PREFIX, "").trim();
+  var parts = command.length === 0 ? [] : command.split(/\s+/);
+  var action = (parts[0] || "help").toLowerCase();
+  if (action === "official" || action === "off" || action === "grok") {
+    var rawOfficial;
+    try {
+      rawOfficial = grokSwitchReadRawConfig();
+    } catch (error) {
+      return "grok-switch: config.json is not valid JSON (" + error.message + "); fix or delete " + GROK_SWITCH_CONFIG_PATH + " from the cloud terminal.";
+    }
+    rawOfficial.active = null;
+    grokSwitchWriteConfig(rawOfficial);
+    return "Switched back to **official Grok**. Saved providers are kept; `/gs use <name>` switches again.";
+  }
+  var config;
+  try {
+    config = grokSwitchParseConfig(grokSwitchReadConfigText());
+  } catch (error) {
+    return "grok-switch: config.json is broken (" + error.message + "). Run `/gs official` to reset the active provider, or fix the file from the cloud terminal.";
+  }
+  var names = Object.keys(config.providers);
+  if (action === "use") {
+    var name = parts[1];
+    if (name == null) return "Usage: `/gs use <name>`. Saved providers: " + (names.length ? names.join(", ") : "none") + ".";
+    if (!Object.prototype.hasOwnProperty.call(config.providers, name)) {
+      return "No provider named `" + name + "`. Saved providers: " + (names.length ? names.join(", ") : "none") + ". Add one from the cloud terminal: `node /workspace/grok-switch/grok-switch.cjs add " + name + " --url ... --model ... --key ...`";
+    }
+    var raw = grokSwitchReadRawConfig();
+    raw.active = name;
+    grokSwitchWriteConfig(raw);
+    return "Switched to **" + name + "** (" + grokSwitchDescribeProvider(config.providers[name]) + "). Your next message uses it.";
+  }
+  if (action === "status" || action === "list" || action === "ls") {
+    var lines = [config.active == null ? "Active: **official Grok**" : "Active: **" + config.active.name + "** (" + grokSwitchDescribeProvider(config.active) + ")"];
+    if (names.length === 0) {
+      lines.push("No saved providers.");
+    } else {
+      lines.push("Saved providers:");
+      for (var i = 0; i < names.length; i += 1) {
+        var p = config.providers[names[i]];
+        lines.push((config.active != null && config.active.name === names[i] ? "- **" : "- ") + names[i] + (config.active != null && config.active.name === names[i] ? "**" : "") + " — " + grokSwitchDescribeProvider(p));
+      }
+    }
+    return lines.join("\n");
+  }
+  return [
+    "grok-switch commands (handled locally, no model call):",
+    "- `/gs use <name>` — route new turns to a saved provider",
+    "- `/gs official` — back to official Grok",
+    "- `/gs status` — show the active route and saved providers",
+    "Adding a provider (with its API key) is done once from the cloud terminal: `node /workspace/grok-switch/grok-switch.cjs use <name> --url ... --model ... --key ...`"
+  ].join("\n");
+}
+
+// A completed stream carrying a fixed reply, shaped like a model response.
+function grokSwitchTextStream(text, invocationId) {
+  var id = invocationId == null || invocationId === "" ? crypto.randomUUID() : invocationId;
+  var usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  var pump = grokSwitchPump();
+  pump.push({ type: "text-delta", textDelta: text });
+  pump.push({ type: "finish", finishReason: "stop", usage: usage, extendedUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, maxTokens: 0 } });
+  pump.end();
+  return {
+    fullStream: pump.iterate(),
+    usage: Promise.resolve(usage),
+    extendedUsage: Promise.resolve({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, maxTokens: 0 }),
+    providerMetadata: Promise.resolve({ grokSwitch: { command: true } }),
+    invocationId: Promise.resolve(id),
+    response: Promise.resolve({ id: id, modelId: "grok-switch", timestamp: new Date(), messages: [{ id: id, role: "assistant", content: [{ type: "text", text: text }] }] })
+  };
+}
+
+// Wraps any executor so a trailing "/gs ..." user message is answered locally.
+function grokSwitchInterceptCommands(executor) {
+  var originalStream = executor.stream;
+  if (typeof originalStream !== "function") return executor;
+  executor.stream = function (ctx, invocationId, tools, options) {
+    var text = null;
+    try {
+      text = grokSwitchLastUserText(executor.getMessages());
+    } catch (_error) {}
+    if (text != null && GROK_SWITCH_COMMAND_PREFIX.test(text)) {
+      var reply;
+      try {
+        reply = grokSwitchCommandReply(text);
+      } catch (error) {
+        reply = "grok-switch: command failed: " + (error && error.message ? error.message : String(error));
+      }
+      return grokSwitchTextStream(reply, invocationId);
+    }
+    return originalStream.call(executor, ctx, invocationId, tools, options);
+  };
+  return executor;
+}
+
+function grokSwitchIsMainSession(sessionOptions) {
+  return grokSwitchRequestKind(sessionOptions) === "main";
 }
 
 // ---------------------------------------------------------------------------
@@ -527,7 +740,7 @@ function grokSwitchMergeState(current, event) {
   return { protocol: protocol, items: current.items.concat(items) };
 }
 
-function grokSwitchBuildHeaders(provider, adapterHeaders) {
+function grokSwitchBuildHeaders(provider, adapterHeaders, codex) {
   var headers = {};
   var names = Object.keys(adapterHeaders || {});
   for (var i = 0; i < names.length; i += 1) headers[names[i]] = adapterHeaders[names[i]];
@@ -535,8 +748,33 @@ function grokSwitchBuildHeaders(provider, adapterHeaders) {
   for (var j = 0; j < extra.length; j += 1) headers[extra[j]] = provider.headers[extra[j]];
   if (provider.authType === "bearer") headers.authorization = "Bearer " + provider.apiKey;
   else if (provider.authType === "x-api-key") headers["x-api-key"] = provider.apiKey;
+  else if (provider.authType === "codex") {
+    headers.authorization = "Bearer " + codex.accessToken;
+    headers["chatgpt-account-id"] = codex.accountId;
+  }
   headers["accept-encoding"] = "identity";
   return headers;
+}
+
+// One upstream POST. For codex auth a 401 triggers a single token refresh.
+async function grokSwitchPost(provider, url, adapterHeaders, body, signal) {
+  var codex = provider.authType === "codex" ? grokSwitchCodexCredentials() : null;
+  var send = function () {
+    return fetch(url, {
+      method: "POST",
+      redirect: "error",
+      headers: grokSwitchBuildHeaders(provider, adapterHeaders, codex),
+      body: body,
+      signal: signal
+    });
+  };
+  var response = await send();
+  if (codex != null && response.status === 401) {
+    await grokSwitchReadFailureBody(response);
+    codex = await grokSwitchCodexRefresh(codex);
+    response = await send();
+  }
+  return response;
 }
 
 function grokSwitchUsageFromFinish(event) {
@@ -666,15 +904,10 @@ function grokSwitchStream(provider, input) {
       var url = provider.baseUrl + adapterRequest.path + provider.baseQuery;
       var response;
       try {
-        response = await fetch(url, {
-          method: "POST",
-          redirect: "error",
-          headers: grokSwitchBuildHeaders(provider, adapterRequest.headers),
-          body: JSON.stringify(adapterRequest.body),
-          signal: deadline.signal
-        });
+        response = await grokSwitchPost(provider, url, adapterRequest.headers, JSON.stringify(adapterRequest.body), deadline.signal);
       } catch (error) {
         if (deadline.signal.aborted) throw grokSwitchAbortError(deadline.signal);
+        if (error != null && /^Codex/.test(String(error.message))) throw new Error("grok-switch: " + error.message);
         var cause = error != null && error.cause != null && error.cause.message ? " (" + error.cause.message + ")" : "";
         throw new Error("grok-switch: cannot reach " + url + cause);
       }
@@ -809,9 +1042,23 @@ function grokSwitchCreateSession(route, onRequestId, sessionOptions) {
       return modelId;
     },
     getExecutor: function (state) {
-      return new Executor(route, state, session);
+      var executor = new Executor(route, state, session);
+      return grokSwitchIsMainSession(sessionOptions) ? grokSwitchInterceptCommands(executor) : executor;
     }
   };
+}
+
+// Official sessions only get the command interceptor; everything else is the
+// host's own object untouched.
+function grokSwitchWrapOfficialSession(session, sessionOptions) {
+  if (session == null || typeof session.getExecutor !== "function" || !grokSwitchIsMainSession(sessionOptions)) return session;
+  var wrapped = {};
+  var keys = Object.keys(session);
+  for (var i = 0; i < keys.length; i += 1) wrapped[keys[i]] = session[keys[i]];
+  wrapped.getExecutor = function (state) {
+    return grokSwitchInterceptCommands(session.getExecutor(state));
+  };
+  return wrapped;
 }
 
 // Wraps the object returned by the host's createHostInference. The route is
@@ -823,7 +1070,9 @@ function grokSwitchWrapHostInference(inference) {
   for (var i = 0; i < keys.length; i += 1) wrapped[keys[i]] = inference[keys[i]];
   wrapped.createSession = function (onRequestId, sessionOptions) {
     var route = grokSwitchResolveRoute();
-    if (route.kind === "official") return inference.createSession(onRequestId, sessionOptions);
+    if (route.kind === "official") {
+      return grokSwitchWrapOfficialSession(inference.createSession(onRequestId, sessionOptions), sessionOptions);
+    }
     return grokSwitchCreateSession(route, onRequestId, sessionOptions);
   };
   // Labeling callbacks send conversation text to the official backend. Skip

@@ -112,7 +112,7 @@ test("use patches the host, requests a restart, and status/list/official/restore
   assert.match(r.out, /pid 4242 .* running current bundle/);
   assert.match(r.out, /active {6}: official Grok/);
 
-  r = run(env, "use", "beef", "--url", "https://api.example.com/v1", "--model", "gpt-5", "--key", "sk-1");
+  r = run(env, "use", "beef", "--url", "https://api.example.com/v1", "--model", "gpt-5", "--key", "sk-1", "--no-test");
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /active provider: beef/);
   assert.match(r.out, /host bundle patched/);
@@ -182,7 +182,7 @@ test("use refuses bundles without the anchors and leaves them untouched", () => 
   const { host, env } = makeEnv();
   fs.writeFileSync(host, FAKE_BUNDLE.replace("function createHostInference(", "function createHostInferenceRenamed("));
   const before = fs.readFileSync(host, "utf8");
-  const r = run(env, "use", "x", "--url", "https://a.example.com", "--model", "m", "--key", "k");
+  const r = run(env, "use", "x", "--url", "https://a.example.com", "--model", "m", "--key", "k", "--no-test");
   assert.equal(r.code, 1);
   assert.match(r.err, /createHostInference definitions \(expected 1\)/);
   assert.equal(fs.readFileSync(host, "utf8"), before);
@@ -191,7 +191,7 @@ test("use refuses bundles without the anchors and leaves them untouched", () => 
 
 test("a host update that replaces the patched bundle is detected and re-patched", () => {
   const { host, env } = makeEnv();
-  let r = run(env, "use", "p", "--url", "https://a.example.com", "--model", "m", "--key", "k");
+  let r = run(env, "use", "p", "--url", "https://a.example.com", "--model", "m", "--key", "k", "--no-test");
   assert.equal(r.code, 0, r.err);
   fs.writeFileSync(host, FAKE_BUNDLE.replace("17184bb", "newver"));
   r = run(env, "status");
@@ -255,6 +255,26 @@ test("test command sends a real request and log shows it", async () => {
     assert.match(lines[0], /local {2}m1 {2}test {2}HTTP 200 .*tokens 12\+1/);
     assert.match(lines[1], /broken {2}bad {2}test {2}HTTP 401 .*ERROR .*bad key/);
     assert.doesNotMatch(r.out, /k1/);
+
+    // `use` with provider flags probes first: a bad provider switches nothing.
+    r = await runAsync(env, "use", "nope", "--url", `http://127.0.0.1:${port}/v1`, "--model", "bad", "--key", "k1");
+    assert.equal(r.code, 1);
+    assert.match(r.err, /did not answer a test request: .*HTTP 401: bad key/);
+    assert.match(r.err, /nothing was switched/);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "config.json"), "utf8")).active, null);
+    assert.equal(fs.readFileSync(env.GROK_SWITCH_HOST, "utf8").includes("GROK_SWITCH_BEGIN"), false);
+
+    r = await runAsync(env, "use", "local", "--model", "m1");
+    assert.equal(r.code, 0, r.err);
+    assert.match(r.out, /test request OK in \d+ms \(reply "OK"\)/);
+    assert.match(r.out, /host bundle patched/);
+    assert.match(r.out, /in chat: \/gs official/);
+
+    r = run(env, "status");
+    assert.match(r.out, /usage {7}:/);
+    assert.match(r.out, /local {2}2 requests, 24 in \/ 2 out tokens/);
+    assert.match(r.out, /broken {2}1 requests \(1 failed\)/);
+    assert.match(r.out, /nope {2}1 requests \(1 failed\)/);
   } finally {
     server.close();
   }
@@ -264,7 +284,7 @@ test("patches the real Grok Bot bundle when it is available locally", { skip: !f
   const { host, env } = makeEnv();
   fs.copyFileSync(REAL_BUNDLE, host);
   const original = fs.readFileSync(host);
-  let r = run(env, "use", "p", "--url", "https://a.example.com", "--model", "m", "--key", "k");
+  let r = run(env, "use", "p", "--url", "https://a.example.com", "--model", "m", "--key", "k", "--no-test");
   assert.equal(r.code, 0, r.err);
   assert.ok(nodeCheck(host));
   const patched = fs.readFileSync(host, "utf8");

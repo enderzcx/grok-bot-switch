@@ -73,9 +73,12 @@ function loadHost({ files = new Map(), fetchImpl } = {}) {
   const labelingCalls = [];
   const context = {
     console,
-    process: { env: {} },
+    process: { env: { CODEX_HOME: "/codex" }, pid: 4242 },
+    Buffer,
+    URLSearchParams,
     fetch: async (url, init) => {
-      fetches.push({ url, init, body: JSON.parse(init.body) });
+      const isJson = init.headers["content-type"] === "application/json";
+      fetches.push({ url, init, body: isJson ? JSON.parse(init.body) : init.body });
       return fetchImpl(url, init, fetches.length);
     },
     TextDecoder,
@@ -122,14 +125,32 @@ function loadHost({ files = new Map(), fetchImpl } = {}) {
         },
         appendFileSync(file, data) {
           files.set(file, (files.get(file) ?? "") + data);
-        }
+        },
+        writeFileSync(file, data) {
+          files.set(file, data);
+        },
+        mkdirSync() {}
       };
     },
     __grokSwitchOriginalCreateHostInference(options) {
       originalCalls.push(options);
       return {
         resolvePrivacyMode: () => "official-privacy",
-        createSession: (onRequestId, sessionOptions) => ({ official: true, onRequestId, sessionOptions }),
+        createSession: (onRequestId, sessionOptions) => ({
+          official: true,
+          onRequestId,
+          sessionOptions,
+          getModelId: () => "grok-official",
+          getExecutor(state) {
+            const executor = new BasePromptExecutor(new BasePromptBuilder(state));
+            executor.stream = (...args) => {
+              originalCalls.push({ streamed: true, args });
+              const done = Promise.resolve({});
+              return { fullStream: (async function* () {})(), usage: done, extendedUsage: done, providerMetadata: done, invocationId: done, response: done };
+            };
+            return executor;
+          }
+        }),
         recordPostTurnLabeling: (args) => labelingCalls.push(["post", args]),
         recordFollowupLabeling: (args) => labelingCalls.push(["followup", args])
       };
@@ -299,6 +320,101 @@ test("provider validation rejects obviously wrong entries", () => {
   assert.throws(() => normalize("x", { ...OPENAI, headers: { Host: "evil" } }), /not allowed/);
   assert.throws(() => normalize("x", { ...OPENAI, parameters: { temperature: 1 } }), /unknown parameter/);
   assert.equal(normalize("x", { ...OPENAI, apiKey: "", authType: "none" }).authType, "none");
+});
+
+async function chat(host, text, sessionOptions = {}) {
+  const session = host.inference.createSession(null, sessionOptions);
+  const executor = session.getExecutor([{ role: "user", content: [{ type: "text", text }] }]);
+  return drain(executor.stream({}, "inv", [], {}));
+}
+
+test("/gs commands in chat are answered locally on both routes and edit config.json", async () => {
+  const files = new Map([[CONFIG_PATH, config(null, { a: OPENAI, b: { ...OPENAI, model: "b-model" } })]]);
+  const host = loadHost({ files, fetchImpl: () => assert.fail("no model call expected") });
+
+  let out = await chat(host, "/gs status");
+  assert.equal(out.streamError, null);
+  const reply = out.events.filter((e) => e.type === "text-delta").map((e) => e.textDelta).join("");
+  assert.match(reply, /Active: \*\*official Grok\*\*/);
+  assert.match(reply, /- a — openai-chat/);
+  assert.equal(out.events.at(-1).type, "finish");
+  assert.equal(out.response.value.messages[0].content[0].text, reply);
+  assert.equal(host.originalCalls.filter((c) => c.streamed).length, 0, "official model was not called");
+
+  out = await chat(host, "  /GS use b");
+  assert.match(out.events[0].textDelta, /Switched to \*\*b\*\*.*b-model/);
+  assert.equal(JSON.parse(files.get(CONFIG_PATH)).active, "b");
+  assert.deepEqual(Object.keys(JSON.parse(files.get(CONFIG_PATH)).providers), ["a", "b"], "providers preserved");
+
+  // Now on the external route: commands still intercepted, no fetch.
+  out = await chat(host, "/gs use nope");
+  assert.match(out.events[0].textDelta, /No provider named `nope`.*Saved providers: a, b/);
+  assert.equal(JSON.parse(files.get(CONFIG_PATH)).active, "b");
+
+  out = await chat(host, "/gs official");
+  assert.match(out.events[0].textDelta, /Switched back to \*\*official Grok\*\*/);
+  assert.equal(JSON.parse(files.get(CONFIG_PATH)).active, null);
+
+  out = await chat(host, "/gs");
+  assert.match(out.events[0].textDelta, /\/gs use <name>/);
+
+  // Ordinary messages on the official route still reach the host executor.
+  out = await chat(host, "hello there");
+  assert.equal(host.originalCalls.filter((c) => c.streamed).length, 1);
+
+  // Non-main sessions (summarization etc.) never intercept.
+  out = await chat(host, "/gs status", { isSummarizationSession: true });
+  assert.equal(host.originalCalls.filter((c) => c.streamed).length, 2);
+});
+
+test("/gs official repairs a broken active pointer", async () => {
+  const files = new Map([[CONFIG_PATH, config("gone", { a: OPENAI })]]);
+  const host = loadHost({ files, fetchImpl: () => assert.fail() });
+  let out = await chat(host, "/gs status");
+  assert.match(out.events[0].textDelta, /config\.json is broken .*Run `\/gs official`/);
+  out = await chat(host, "/gs official");
+  assert.match(out.events[0].textDelta, /Switched back/);
+  assert.equal(host.inference.createSession(null, {}).official, true);
+});
+
+test("codex auth signs with the ChatGPT login and refreshes once on 401", async () => {
+  const idToken = "h." + Buffer.from(JSON.stringify({ aud: "client-123" })).toString("base64url") + ".s";
+  const auth = { auth_mode: "chatgpt", tokens: { access_token: "old-access", refresh_token: "refresh-1", id_token: idToken, account_id: "acct-9" } };
+  const provider = { protocol: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", model: "gpt-5-codex", authType: "codex" };
+  const files = new Map([[CONFIG_PATH, config("cx", { cx: provider })], ["/codex/auth.json", JSON.stringify(auth)]]);
+  const text = fs.readFileSync(path.join(FIXTURES, "openai-responses", "text.sse"), "utf8");
+  const host = loadHost({
+    files,
+    fetchImpl: (url, init, n) => {
+      if (url === "https://auth.openai.com/oauth/token") {
+        assert.equal(init.headers["content-type"], "application/x-www-form-urlencoded");
+        const form = new URLSearchParams(init.body);
+        assert.equal(form.get("grant_type"), "refresh_token");
+        assert.equal(form.get("refresh_token"), "refresh-1");
+        assert.equal(form.get("client_id"), "client-123");
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ access_token: "new-access", refresh_token: "refresh-2" }) };
+      }
+      if (n === 1) return jsonFailure(401, { detail: "expired" });
+      return sse(text);
+    }
+  });
+  const out = await drain(host.inference.createSession(null, {}).getExecutor([{ role: "user", content: "hi" }]).stream({}, "i", [], {}));
+  assert.equal(out.streamError, null, out.streamError && out.streamError.message);
+  assert.equal(host.fetches.length, 3);
+  assert.equal(host.fetches[0].url, "https://chatgpt.com/backend-api/codex/responses");
+  assert.equal(host.fetches[0].init.headers.authorization, "Bearer old-access");
+  assert.equal(host.fetches[0].init.headers["chatgpt-account-id"], "acct-9");
+  assert.equal(host.fetches[0].body.store, false);
+  assert.equal(host.fetches[2].init.headers.authorization, "Bearer new-access");
+  const saved = JSON.parse(files.get("/codex/auth.json"));
+  assert.equal(saved.tokens.access_token, "new-access");
+  assert.equal(saved.tokens.refresh_token, "refresh-2");
+  assert.equal(saved.tokens.account_id, "acct-9");
+  assert.ok(saved.last_refresh);
+
+  files.delete("/codex/auth.json");
+  const missing = await drain(host.inference.createSession(null, {}).getExecutor([{ role: "user", content: "hi" }]).stream({}, "i", [], {}));
+  assert.match(missing.streamError.message, /Codex login not found .*codex login/);
 });
 
 test("payload parses under strict mode and defines no unexpected globals in the host scope", () => {
