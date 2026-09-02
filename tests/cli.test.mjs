@@ -280,6 +280,74 @@ test("test command sends a real request and log shows it", async () => {
   }
 });
 
+test("ui panel: token-gated API drives save, probe, use, official and stop", async () => {
+  const { host, env } = makeEnv();
+  const { server, port } = await startFakeOpenAi(() => ({ status: 200 }));
+  const api = async (base, tok, path, body) => {
+    const res = await fetch(base + path, { method: body === undefined ? "GET" : "POST", headers: { "x-gs-token": tok, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: res.status, json: await res.json().catch(() => null), text: null };
+  };
+  try {
+    let r = await runAsync(env, "ui", "--background", "--port", "0");
+    assert.equal(r.code, 0, r.err);
+    const url = /panel running: (http:\/\/127\.0\.0\.1:\d+\/\?t=[a-f0-9]{32})/.exec(r.out)[1];
+    const base = url.slice(0, url.indexOf("/?"));
+    const tok = url.slice(url.indexOf("t=") + 2);
+    const state = JSON.parse(fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "ui.json"), "utf8"));
+    assert.equal(state.url, url);
+
+    const page = await fetch(base + "/");
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /Grok Bot Switch/);
+    assert.equal((await api(base, "wrong", "/api/state")).status, 403);
+
+    let s = await api(base, tok, "/api/state");
+    assert.equal(s.status, 200);
+    assert.equal(s.json.route, "official");
+    assert.equal(s.json.host.patched, false);
+    assert.deepEqual(s.json.providers, {});
+
+    let saved = await api(base, tok, "/api/providers", { name: "local", protocol: "openai-chat", baseUrl: `http://127.0.0.1:${port}/v1`, model: "m1", apiKey: "k1" });
+    assert.equal(saved.status, 200, JSON.stringify(saved.json));
+    assert.equal(saved.json.probe.ok, true);
+    assert.equal(saved.json.state.providers.local.hasKey, true);
+    assert.equal("apiKey" in saved.json.state.providers.local, false, "key never returned to the page");
+
+    const bad = await api(base, tok, "/api/providers", { name: "bad name", baseUrl: "x", model: "m" });
+    assert.equal(bad.status, 400);
+    assert.match(bad.json.error, /provider name/);
+
+    const used = await api(base, tok, "/api/use", { name: "local" });
+    assert.equal(used.status, 200, JSON.stringify(used.json));
+    assert.match(used.json.lines.join(" "), /host bundle patched/);
+    assert.equal(used.json.state.active, "local");
+    assert.equal(used.json.state.host.patched, true);
+    assert.ok(fs.readFileSync(host, "utf8").includes("GROK_SWITCH_BEGIN"));
+
+    const official = await api(base, tok, "/api/official", {});
+    assert.equal(official.json.state.active, null);
+    s = await api(base, tok, "/api/state");
+    assert.equal(s.json.usage.local.requests, 1);
+
+    r = await runAsync(env, "ui", "status");
+    assert.match(r.out, /panel running: http/);
+    r = await runAsync(env, "ui", "--background");
+    assert.match(r.out, /panel already running/);
+    r = await runAsync(env, "ui", "stop");
+    assert.match(r.out, /panel stopped/);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await assert.rejects(fetch(base + "/"));
+    r = await runAsync(env, "ui", "status");
+    assert.match(r.out, /not running/);
+  } finally {
+    server.close();
+    try {
+      const left = JSON.parse(fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "ui.json"), "utf8"));
+      process.kill(left.pid);
+    } catch {}
+  }
+});
+
 test("patches the real Grok Bot bundle when it is available locally", { skip: !fs.existsSync(REAL_BUNDLE) && "real bundle not present" }, () => {
   const { host, env } = makeEnv();
   fs.copyFileSync(REAL_BUNDLE, host);

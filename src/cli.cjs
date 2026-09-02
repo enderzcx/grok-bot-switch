@@ -39,6 +39,7 @@ var CLI_USAGE = [
   "  log [N]                         show the last N upstream requests (default 20)",
   "  restart                         ask the supervisor to restart the host when idle",
   "  restore                         remove the patch from the host bundle and restart",
+  "  ui [--background] [--port N]    web panel on 127.0.0.1 for configuring providers (ui stop / ui status)",
   "",
   "provider options:",
   "  --url <baseUrl>                 e.g. https://api.openai.com/v1 (required)",
@@ -76,7 +77,7 @@ function cliParseArgs(argv) {
     var value;
     if (eq !== -1) {
       value = arg.slice(eq + 1);
-    } else if (name === "json" || name === "force" || name === "no-test") {
+    } else if (name === "json" || name === "force" || name === "no-test" || name === "background") {
       value = true;
     } else {
       if (i + 1 >= argv.length) throw new CliError("--" + name + " needs a value");
@@ -436,8 +437,24 @@ function cliHostState() {
 // ---------------------------------------------------------------------------
 // Commands
 
+// Output sink. The web panel captures command output by swapping it.
+var cliSink = null;
+
 function cliPrint(line) {
-  process.stdout.write(line + "\n");
+  if (cliSink != null) cliSink.push(line);
+  else process.stdout.write(line + "\n");
+}
+
+async function cliCapture(fn) {
+  var lines = [];
+  var previous = cliSink;
+  cliSink = lines;
+  try {
+    await fn();
+  } finally {
+    cliSink = previous;
+  }
+  return lines;
 }
 
 function cliCommandAdd(args) {
@@ -756,6 +773,7 @@ async function cliMain(argv) {
   if (command === "log") return cliCommandLog(args);
   if (command === "restart") return cliCommandRestart(args);
   if (command === "restore") return cliCommandRestore(args);
+  if (command === "ui") return uiCommand(args);
   throw new CliError("unknown command " + command + "\n\n" + CLI_USAGE);
 }
 
