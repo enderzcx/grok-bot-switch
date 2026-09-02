@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// grok-switch 0.6.1 - https://github.com/enderzcx/grok-bot-switch
+// grok-switch 0.6.2 - https://github.com/enderzcx/grok-bot-switch
 // Single-file build. Do not edit; regenerate with `node build.mjs`.
 "use strict";
 // GROK_SWITCH_PAYLOAD_BEGIN
@@ -11,7 +11,8 @@ function __grokSwitchRegister(id, factory) {
 function __grokSwitchRequire(id) {
   if (__grokSwitchModules[id] == null) {
     var factory = __grokSwitchFactories[id];
-    if (factory == null) throw new Error("grok-switch: unknown bundled module " + id);
+    // Node built-ins (node:crypto) come from the host's own require.
+    if (factory == null) return require(id);
     var module = { exports: {} };
     __grokSwitchModules[id] = module;
     factory(module, module.exports, __grokSwitchRequire);
@@ -667,6 +668,18 @@ __grokSwitchRegister("./tools.cjs", function (module, exports, require) {
 "use strict";
 
 var contract = require("./contract.cjs");
+var nodeCrypto = require("node:crypto");
+
+// Providers cap tool call ids (OpenAI Responses: 64 chars; Anthropic:
+// [A-Za-z0-9_-]). Grok Bot's own ids are longer, so out-of-spec ids are
+// replaced by a deterministic hash: the same original id always maps to the
+// same short id, which keeps tool results paired with their calls.
+var TOOL_CALL_ID_OK = /^[A-Za-z0-9_-]{1,64}$/;
+
+function normalizeToolCallId(id) {
+  if (TOOL_CALL_ID_OK.test(id)) return id;
+  return "call_" + nodeCrypto.createHash("sha256").update(id).digest("hex").slice(0, 32);
+}
 
 function unsupported(protocolId, detail) {
   return contract.protocolError(detail || "Shape is unrepresentable", {
@@ -888,7 +901,7 @@ function hostToolCall(part, protocolId) {
   if (part.providerOptions != null && part.providerOptions.cursor != null && typeof part.providerOptions.cursor.rawToolCallArgs === "string") {
     args = part.providerOptions.cursor.rawToolCallArgs;
   }
-  return { id: id, name: name, arguments: jsonArgumentString(args, protocolId) };
+  return { id: normalizeToolCallId(id), name: name, arguments: jsonArgumentString(args, protocolId) };
 }
 
 function openAiShapedToolCall(toolCall, protocolId) {
@@ -904,7 +917,7 @@ function openAiShapedToolCall(toolCall, protocolId) {
       code: "incomplete-tool-call"
     });
   }
-  return { id: id, name: name, arguments: jsonArgumentString(fn.arguments, protocolId) };
+  return { id: normalizeToolCallId(id), name: name, arguments: jsonArgumentString(fn.arguments, protocolId) };
 }
 
 function extractAssistantPayload(message, protocolId) {
@@ -1009,7 +1022,7 @@ function toolResultContent(part, rich, protocolId) {
 // image outputs the tool produced (screenshots etc.).
 function extractToolResults(message, protocolId) {
   if (typeof message.tool_call_id === "string" && message.tool_call_id.length > 0 && (typeof message.content === "string" || message.content == null)) {
-    return [{ id: message.tool_call_id, name: message.name, content: message.content == null ? "" : message.content, images: [] }];
+    return [{ id: normalizeToolCallId(message.tool_call_id), name: message.name, content: message.content == null ? "" : message.content, images: [] }];
   }
   if (!Array.isArray(message.content)) {
     throw unsupported(protocolId, "Tool content is unrepresentable");
@@ -1029,7 +1042,7 @@ function extractToolResults(message, protocolId) {
     }
     var rich = toolResultRichParts(part, protocolId);
     out.push({
-      id: id,
+      id: normalizeToolCallId(id),
       name: typeof part.toolName === "string" ? part.toolName : part.tool_name,
       content: toolResultContent(part, rich, protocolId),
       images: rich.images
@@ -4576,7 +4589,7 @@ var cliFs = require("node:fs");
 var cliPath = require("node:path");
 var cliChildProcess = require("node:child_process");
 
-var CLI_VERSION = "0.6.1";
+var CLI_VERSION = "0.6.2";
 var CLI_HOST_PATH = process.env.GROK_SWITCH_HOST || "/home/box/sand-host/host-main.cjs";
 var CLI_HOST_VERSION_PATH = cliPath.join(cliPath.dirname(CLI_HOST_PATH), "version");
 var CLI_BACKUP_PATH = CLI_HOST_PATH + ".grok-switch.orig";

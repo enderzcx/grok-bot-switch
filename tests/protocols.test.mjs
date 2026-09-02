@@ -734,6 +734,37 @@ const OFFICIAL_HISTORY = [
   { role: "user", content: [{ type: "text", text: "What do you see?" }, { type: "image", image: "R0lGODlh" }] }
 ];
 
+test("tool call ids longer than 64 chars are shortened consistently for calls and results", () => {
+  const longId = "toolu_" + "x".repeat(79);
+  assert.equal(longId.length, 85);
+  const request = {
+    model: "m", stream: true, maxTokens: 64,
+    tools: [{ name: "alpha", parameters: { type: "object", properties: {} } }],
+    messages: [
+      { role: "user", content: "go" },
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: longId, toolName: "alpha", args: {} }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: longId, toolName: "alpha", result: "done" }] },
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: "call_short", toolName: "alpha", args: {} }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "call_short", toolName: "alpha", result: "done" }] }
+    ]
+  };
+  const responses = protocols.getAdapter("openai-responses").buildRequest(request).body.input;
+  const call = responses.find((i) => i.type === "function_call");
+  const output = responses.find((i) => i.type === "function_call_output");
+  assert.ok(call.call_id.length <= 64 && /^[A-Za-z0-9_-]+$/.test(call.call_id), call.call_id);
+  assert.notEqual(call.call_id, longId);
+  assert.equal(output.call_id, call.call_id, "result keeps pointing at its call");
+  assert.equal(responses.filter((i) => i.type === "function_call")[1].call_id, "call_short", "in-spec ids are untouched");
+
+  const chat = protocols.getAdapter("openai-chat").buildRequest(request).body.messages;
+  assert.equal(chat[1].tool_calls[0].id, call.call_id, "same mapping across protocols");
+  assert.equal(chat[2].tool_call_id, call.call_id);
+
+  const anthropic = protocols.getAdapter("anthropic-messages").buildRequest(request).body.messages;
+  assert.equal(anthropic[1].content[0].id, call.call_id);
+  assert.equal(anthropic[2].content[0].tool_use_id, call.call_id);
+});
+
 test("history from official Grok is degraded, not rejected", () => {
   const request = { model: "m", stream: true, maxTokens: 64, messages: OFFICIAL_HISTORY, tools: [{ name: "screenshot", parameters: { type: "object", properties: {} } }] };
   const chat = protocols.getAdapter("openai-chat").buildRequest(request).body;

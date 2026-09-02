@@ -34,7 +34,8 @@ function __grokSwitchRegister(id, factory) {
 function __grokSwitchRequire(id) {
   if (__grokSwitchModules[id] == null) {
     var factory = __grokSwitchFactories[id];
-    if (factory == null) throw new Error("grok-switch: unknown bundled module " + id);
+    // Node built-ins (node:crypto) come from the host's own require.
+    if (factory == null) return require(id);
     var module = { exports: {} };
     __grokSwitchModules[id] = module;
     factory(module, module.exports, __grokSwitchRequire);

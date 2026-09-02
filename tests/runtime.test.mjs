@@ -2,6 +2,7 @@
 // imitates the host bundle scope, then drives createHostInference the way the
 // host does. Run `node build.mjs` first (npm test does).
 import assert from "node:assert/strict";
+import nodeCrypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -105,6 +106,7 @@ function loadHost({ files = new Map(), fetchImpl } = {}) {
     BasePromptBuilder,
     BasePromptExecutor,
     require(id) {
+      if (id === "node:crypto") return nodeCrypto;
       assert.equal(id, "node:fs");
       return {
         readFileSync(file) {
