@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Grok Bot Switch 使用向导</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                   "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+  </style>
+  <link rel="stylesheet" href="./assets/style.css" />
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <div class="hero-badge">Grok Bot Switch</div>
+      <h1>让 Grok Bot 用你自己的模型</h1>
+      <p class="hero-sub">一段提示词装好，之后在聊天框里一行字切换。支持 OpenAI / Claude 兼容接口，也能直接用 ChatGPT 订阅。</p>
+    </header>
+
+    <nav class="tabs" id="tabs">
+      <button class="tab is-active" type="button" data-view="install">安装</button>
+      <button class="tab" type="button" data-view="switch">切换</button>
+      <button class="tab" type="button" data-view="chatgpt">ChatGPT</button>
+      <button class="tab" type="button" data-view="faq">常见问题</button>
+    </nav>
+
+    <!-- 安装 -->
+    <section class="view is-active" id="view-install">
+      <div class="card">
+        <h2>第一步：选一种安装方式</h2>
+        <div class="segment" id="mode">
+          <button class="segment-item is-active" type="button" data-mode="panel">面板配置（推荐）</button>
+          <button class="segment-item" type="button" data-mode="direct">直接配置</button>
+        </div>
+        <p class="muted" id="mode-desc">Grok Bot 装好后在它的云端电脑上打开一个配置面板，你在 Grok Bot 的云端桌面里自己填供应商、测试、切换，也可以在面板里用 ChatGPT 登录。API key 不经过聊天记录。</p>
+      </div>
+
+      <div class="card" id="direct-form-card" hidden>
+        <h2>填写供应商信息</h2>
+        <p class="muted">留空的项会让 Grok Bot 在对话里问你。</p>
+        <form id="direct-form" novalidate>
+          <div class="field">
+            <label for="f-name">名字（给自己看的，英文数字）</label>
+            <input id="f-name" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="myapi" value="myapi" />
+          </div>
+          <div class="field">
+            <label for="f-protocol">协议</label>
+            <select id="f-protocol">
+              <option value="openai-chat">OpenAI Chat Completions（大多数中转站、DeepSeek、xAI）</option>
+              <option value="openai-responses">OpenAI Responses</option>
+              <option value="anthropic-messages">Anthropic Messages（Claude）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="f-url">接口根地址</label>
+            <input id="f-url" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://api.example.com/v1" />
+            <small class="hint" id="url-hint"></small>
+          </div>
+          <div class="field">
+            <label for="f-model">模型</label>
+            <input id="f-model" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="gpt-5" />
+          </div>
+          <div class="field">
+            <label for="f-key">API key <span class="muted">（可留空，Grok Bot 会问你；填了会出现在聊天记录里）</span></label>
+            <input id="f-key" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="sk-..." />
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>第二步：把这段发给 Grok Bot</h2>
+        <p class="muted">长按下面的文字，全选后复制，发到 Grok Bot 的聊天框里。</p>
+        <textarea class="prompt" id="prompt" readonly rows="6"></textarea>
+        <div class="actions">
+          <button class="btn btn-primary" type="button" id="select-all">全选文字</button>
+          <span class="muted small" id="select-hint"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>第三步：等 Grok Bot 回复</h2>
+        <ol class="steps">
+          <li>Grok Bot 下载工具、给它的云端主程序打补丁、申请一次重启。这一次重启在它回复完后由 Grok 自带的机制执行，几秒钟。</li>
+          <li>面板模式：Bot 会说"面板已打开"，你在 Grok Bot 的云端桌面里操作面板；直接配置模式：Bot 先向你的接口发一条测试请求，通过后立刻切换。</li>
+          <li>新开一条消息试试。发 <code>/gs status</code> 可以确认当前走的是哪个模型。</li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- 切换 -->
+    <section class="view" id="view-switch">
+      <div class="card">
+        <h2>装好之后，在聊天框里切</h2>
+        <p class="muted">这些消息在云端主程序里直接处理，不发给任何模型、不花 token、任何平台都一样。</p>
+        <table class="cmd">
+          <tr><td><code>/gs use myapi</code></td><td>切到已保存的供应商，下一条消息生效</td></tr>
+          <tr><td><code>/gs official</code></td><td>切回官方 Grok，配置保留</td></tr>
+          <tr><td><code>/gs status</code></td><td>看当前走哪里、保存了哪些供应商</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h2>再加一个供应商</h2>
+        <p>面板模式：对 Grok Bot 说"打开 grok-switch 面板"，在面板里添加。直接配置模式：回到"安装"页换个名字和参数，再生成一段提示词发给它。已保存的供应商都会保留，随时 <code>/gs use</code> 切换。</p>
+      </div>
+      <div class="card">
+        <h2>面板里能做什么</h2>
+        <ul class="list">
+          <li>添加、修改、删除供应商；保存时真发一条测试请求，地址、key、模型任何一个不对当场报出来</li>
+          <li>一键切换、切回官方、卸载补丁</li>
+          <li>用 ChatGPT 登录代替 API key</li>
+          <li>看每个供应商累计用了多少次、多少 token，以及最近请求的状态和错误原因</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ChatGPT -->
+    <section class="view" id="view-chatgpt">
+      <div class="card">
+        <h2>用 ChatGPT 订阅，不用 API key</h2>
+        <p>用的是你 ChatGPT Plus / Pro 的额度。登录在你自己的手机或电脑上完成，云端只保存登录凭据，过期自动刷新。</p>
+        <ol class="steps">
+          <li>在面板里点"登录 ChatGPT"（云端没装 Codex CLI 的话先点"安装 Codex CLI"）。</li>
+          <li>面板显示一个网址和一次性验证码。在你自己的浏览器里打开网址、输入验证码、登录 ChatGPT。</li>
+          <li>回到面板，登录成功后会自动保存一个叫 <code>chatgpt</code> 的供应商，点"使用"即可。</li>
+        </ol>
+      </div>
+      <div class="card card-warn">
+        <h2>请先知道这一点</h2>
+        <p>这是让 Codex 的后端为非 Codex 程序提供服务，在 OpenAI 的条款上属于擦边行为，账号有被限制的可能。是否使用请自行权衡。Claude 的账号登录不支持，Anthropic 接口请用 API key。</p>
+      </div>
+    </section>
+
+    <!-- FAQ -->
+    <section class="view" id="view-faq">
+      <div class="card faq" id="faq">
+        <details>
+          <summary>它是怎么工作的？会改我电脑上的 Grok Bot 吗？</summary>
+          <p>不改你本机的任何东西。Grok Bot 的推理请求不是从你的 Mac / Windows 发出的，而是从它的云端 Linux 电脑里的主程序发出的。工具在云端主程序创建推理会话的地方接了一段代码：没选供应商就照旧走官方 Grok；选了就直接从云端请求你的接口，请求、流式回复、工具调用、推理内容都按协议转换。</p>
+        </details>
+        <details>
+          <summary>为什么安装时要重启一次主程序？以后每次切换都要重启吗？</summary>
+          <p>主程序是一个正在运行的进程，代码在启动时已经读进内存，改磁盘文件不会影响它，只有重启一次才带着补丁起来。这一次在安装时就申请了，由 Grok 自带的机制在没有 Bot 忙碌时执行。之后切换只是改配置文件，主程序每次新会话读一遍，不再重启。</p>
+        </details>
+        <details>
+          <summary>Grok Bot 升级了怎么办？</summary>
+          <p>升级会覆盖主程序，补丁随之丢失，请求会自动回到官方 Grok。面板和 <code>/gs status</code> 会提示；再点一次"使用"或把安装提示词再发一次即可重新打补丁。工具不依赖 Grok Bot 的具体版本号，只认主程序里一个函数名。</p>
+        </details>
+        <details>
+          <summary>API key 会被谁看到？</summary>
+          <p>用面板模式配置，key 只写进云端一个仅当前用户可读的文件，不经过聊天记录。用直接配置模式并把 key 写进提示词，它会出现在你和 Grok Bot 的对话历史里。面板和请求日志都不回显 key。</p>
+        </details>
+        <details>
+          <summary>接口报错、余额不足了会怎样？</summary>
+          <p>对话直接显示供应商返回的错误原文（比如 401 key 无效、429 限流），并写进请求日志。不会悄悄回落到官方 Grok 计费。</p>
+        </details>
+        <details>
+          <summary>已有的旧对话能直接切吗？</summary>
+          <p>能。官方 Grok 产生的历史里有外部接口无法表达的内容（脱敏推理、带签名的推理、工具返回的截图、文件附件），会按规则降级而不是报错：脱敏推理丢弃，工具截图改用图片消息携带，附件替换成一行占位文字。</p>
+        </details>
+        <details>
+          <summary>哪些功能不走我的供应商？</summary>
+          <p>切换影响同一云端上的所有 Bot 的对话推理。语音转写、对话标题生成等非推理功能仍走官方。</p>
+        </details>
+        <details>
+          <summary>怎么彻底卸载？</summary>
+          <p>面板里点"卸载补丁"，或对 Grok Bot 说执行 <code>node /workspace/grok-switch/grok-switch.cjs restore</code>。主程序会逐字节恢复成原文件并重启一次。</p>
+        </details>
+      </div>
+      <div class="card">
+        <h2>项目地址</h2>
+        <p class="selectable">github.com/enderzcx/grok-bot-switch</p>
+        <p class="muted small">开源，MIT 协议。非 xAI / X 官方项目。</p>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <span class="muted small">Grok Bot Switch 使用向导 · 本页纯本地运行，不联网</span>
+    </footer>
+  </div>
+  <script src="./assets/main.js"></script>
+</body>
+</html>
