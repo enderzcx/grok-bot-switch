@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// grok-switch 0.6.0 - https://github.com/enderzcx/grok-bot-switch
+// grok-switch 0.6.1 - https://github.com/enderzcx/grok-bot-switch
 // Single-file build. Do not edit; regenerate with `node build.mjs`.
 "use strict";
 // GROK_SWITCH_PAYLOAD_BEGIN
@@ -4576,7 +4576,7 @@ var cliFs = require("node:fs");
 var cliPath = require("node:path");
 var cliChildProcess = require("node:child_process");
 
-var CLI_VERSION = "0.6.0";
+var CLI_VERSION = "0.6.1";
 var CLI_HOST_PATH = process.env.GROK_SWITCH_HOST || "/home/box/sand-host/host-main.cjs";
 var CLI_HOST_VERSION_PATH = cliPath.join(cliPath.dirname(CLI_HOST_PATH), "version");
 var CLI_BACKUP_PATH = CLI_HOST_PATH + ".grok-switch.orig";
@@ -4599,6 +4599,7 @@ var CLI_USAGE = [
   "",
   "usage: node grok-switch.cjs <command> [options]",
   "",
+  "  install [--no-ui] [--port N]    patch the host now, request its one-time restart, start the panel",
   "  use <name> [provider options]   switch to a saved provider (saves and test-requests it first if options given)",
   "  official                        switch back to official Grok; saved providers are kept",
   "  add <name> <provider options>   save or update a provider without switching",
@@ -4647,7 +4648,7 @@ function cliParseArgs(argv) {
     var value;
     if (eq !== -1) {
       value = arg.slice(eq + 1);
-    } else if (name === "json" || name === "force" || name === "no-test" || name === "background") {
+    } else if (name === "json" || name === "force" || name === "no-test" || name === "background" || name === "no-ui") {
       value = true;
     } else {
       if (i + 1 >= argv.length) throw new CliError("--" + name + " needs a value");
@@ -5126,6 +5127,27 @@ async function cliCommandUse(args) {
   cliPrint("in chat: /gs official switches back, /gs use <name> switches again, /gs status shows the route.");
 }
 
+// One-shot setup run by Grok Bot: patch now (transparent while no provider
+// is active), request the single restart, start the panel. By the time the
+// user opens the panel the host is already running the patched code.
+async function cliCommandInstall(args) {
+  var outcome = cliEnsurePatched();
+  if (outcome === "patched") cliPrint("host bundle patched; original saved to " + CLI_BACKUP_PATH);
+  else if (outcome === "updated") cliPrint("host bundle patch updated to " + CLI_VERSION);
+  else cliPrint("host bundle already patched (" + CLI_VERSION + ")");
+  var state = cliHostState();
+  if (outcome !== "unchanged" || state.runningCurrentBundle === false) {
+    cliExplainRestart(cliRequestRestart("grok-switch install"));
+    cliPrint("this restart happens once, after the current Bot turn ends; switching providers later never restarts.");
+  } else {
+    cliPrint("host process already runs the patched code; no restart needed.");
+  }
+  cliPrint("route: " + (grokSwitchResolveRoute().kind === "official" ? "official Grok (unchanged until a provider is selected)" : "external provider selected"));
+  if (!args.flags["no-ui"]) {
+    await uiCommand({ positional: ["ui"], flags: { background: true, port: args.flags.port } });
+  }
+}
+
 function cliCommandOfficial() {
   var config = cliReadRawConfig();
   config.active = null;
@@ -5333,6 +5355,7 @@ async function cliMain(argv) {
     return;
   }
   if (command === "version") return cliPrint(CLI_VERSION);
+  if (command === "install") return cliCommandInstall(args);
   if (command === "add") return cliCommandAdd(args);
   if (command === "remove") return cliCommandRemove(args);
   if (command === "list") return cliCommandList(args);

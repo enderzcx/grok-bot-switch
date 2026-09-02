@@ -280,6 +280,39 @@ test("test command sends a real request and log shows it", async () => {
   }
 });
 
+test("install patches, requests the one-time restart and starts the panel; later use needs no restart", async () => {
+  const { dir, host, env } = makeEnv();
+  try {
+    let r = await runAsync(env, "install", "--port", "0");
+    assert.equal(r.code, 0, r.err);
+    assert.match(r.out, /host bundle patched/);
+    assert.match(r.out, /restart requested/);
+    assert.match(r.out, /route: official Grok \(unchanged/);
+    assert.match(r.out, /panel running: http:\/\/127\.0\.0\.1:\d+\/\?t=/);
+    assert.ok(fs.readFileSync(host, "utf8").includes("GROK_SWITCH_BEGIN"));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "sup", "command.json"), "utf8")).reason, "grok-switch install");
+    assert.equal(fs.existsSync(path.join(dir, "cfg", "config.json")), false, "install selects no provider");
+
+    // Simulate the supervisor applying the restart: command consumed, process restarted after the bundle change.
+    fs.rmSync(path.join(dir, "sup", "command.json"));
+    const future = new Date(Date.now() + 60 * 1000);
+    fs.utimesSync(host, new Date(Date.now() - 60 * 1000), new Date(Date.now() - 60 * 1000));
+    fs.writeFileSync(path.join(env.GROK_SWITCH_PROC, "stat"), `cpu 0 0 0 0\nbtime ${Math.floor(future.getTime() / 1000) - 3600}\n`);
+
+    r = await runAsync(env, "install", "--no-ui");
+    assert.match(r.out, /already patched/);
+    assert.match(r.out, /no restart needed/);
+    assert.equal(fs.existsSync(path.join(dir, "sup", "command.json")), false);
+
+    r = run(env, "use", "p", "--url", "https://a.example.com", "--model", "m", "--key", "k", "--no-test");
+    assert.equal(r.code, 0, r.err);
+    assert.match(r.out, /takes effect on the next conversation turn; no restart needed/);
+    assert.equal(fs.existsSync(path.join(dir, "sup", "command.json")), false);
+  } finally {
+    run(env, "ui", "stop");
+  }
+});
+
 test("ui panel: token-gated API drives save, probe, use, official and stop", async () => {
   const { host, env } = makeEnv();
   const { server, port } = await startFakeOpenAi(() => ({ status: 200 }));

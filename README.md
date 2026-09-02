@@ -8,13 +8,15 @@
 
 > 请在你的云端电脑执行下面这条命令，把输出里的面板地址在你的浏览器里打开，然后告诉我"面板已打开，请在云端桌面里配置"。不要做别的事：
 >
-> `mkdir -p /workspace/grok-switch && curl -fsSL https://raw.githubusercontent.com/enderzcx/grok-bot-switch/main/dist/grok-switch.cjs -o /workspace/grok-switch/grok-switch.cjs && node /workspace/grok-switch/grok-switch.cjs ui --background`
+> `mkdir -p /workspace/grok-switch && curl -fsSL https://raw.githubusercontent.com/enderzcx/grok-bot-switch/main/dist/grok-switch.cjs -o /workspace/grok-switch/grok-switch.cjs && node /workspace/grok-switch/grok-switch.cjs install`
+
+`install` 会下载后立刻给云端主程序打补丁并申请一次重启（补丁在没选供应商时完全透明，仍走官方 Grok），然后启动面板。Bot 回复完这一轮，主程序重启，之后就不再需要任何重启。
 
 **2. 在 Grok Bot 的云端桌面里操作面板**（面板只在云端本机可访问，不要把地址复制到自己电脑的浏览器）：
 
-- **加供应商**：填名字、协议、接口根地址、模型、API key，点"保存并测试"。它会真发一条测试请求，地址、key、模型任何一个不对都当场报出来。测试通过默认直接切换过去。
+- **加供应商**：填名字、协议、接口根地址、模型、API key，点"保存并测试"。它会真发一条测试请求，地址、key、模型任何一个不对都当场报出来。测试通过默认直接切换过去，下一条消息生效。
 - **用 ChatGPT 订阅**：点"登录 ChatGPT"，面板显示一个网址和一次性验证码，你在**自己的**手机或电脑上打开网址、输验证码，登录完成后面板自动保存一个供应商。不需要 API key，用的是 Plus/Pro 额度；云端未装 Codex CLI 时面板有一键安装按钮。
-- **切换**：点供应商右边的"使用"，或"切回官方 Grok"。第一次切换会给云端主程序打补丁并申请一次重启（Grok 自带的 supervisor 会在没有 Bot 忙碌时执行），之后切换不需要重启，下一条消息生效。
+- **切换**：点供应商右边的"使用"，或"切回官方 Grok"，下一条消息生效，不重启。
 
 **3. 以后在聊天框里切**，任何平台都行，不用面板也不用终端，不调模型、不花 token：
 
@@ -47,6 +49,7 @@
 
 | 命令 | 作用 |
 |---|---|
+| `install [--no-ui]` | 打补丁、申请一次重启、启动面板；重复执行无副作用 |
 | `ui [--background] [--port N]` / `ui status` / `ui stop` | 配置面板，只监听 127.0.0.1，地址带一次性令牌 |
 | `use <name> [选项]` | 切到某个供应商；带选项时先保存/更新它并先发测试请求（`--no-test` 跳过）。必要时打补丁并申请重启 |
 | `official` | 切回官方 Grok，配置保留 |
@@ -68,7 +71,7 @@ Grok Bot 的推理请求不是从你的 Mac/Windows 发出的，而是从它的�
 - 选中了供应商 → 直接从云端 `fetch` 你的 API，带上凭据；请求、流式回复、工具调用、推理内容都按协议转换。
 - 最后一条用户消息以 `/gs` 开头 → 在主程序里直接执行、直接回复，不发给任何模型。
 
-因为路由是每次会话时决定的，切换只是改配置文件，**不需要重启**。只有第一次打补丁（以及 Grok Bot 升级覆盖了主程序之后重新打补丁）需要重启一次主程序。补丁只依赖主程序里 `createHostInference` 这一个函数名，不校验版本哈希；写入前 `node --check`，原文件备份为 `host-main.cjs.grok-switch.orig`，`restore` 后逐字节一致。
+因为路由是每次会话时决定的，切换只是改配置文件，**不需要重启**。为什么装的时候要重启一次：主程序是一个已经在跑的 Node 进程，代码在启动时已读进内存，改磁盘文件不会影响它，只有重启才会带着补丁起来。这一次重启在 `install` 时就申请了，由 Grok 自带的 supervisor 在没有 Bot 忙碌时执行（Grok 给自己升级用的同一机制）；之后除 Grok Bot 升级覆盖主程序需要重新打补丁外，不再重启。补丁只依赖主程序里 `createHostInference` 这一个函数名，不校验版本哈希；写入前 `node --check`，原文件备份为 `host-main.cjs.grok-switch.orig`，`restore` 后逐字节一致。
 
 面板是 `dist/grok-switch.cjs` 里内嵌的一页 HTML，由同一个文件起的 HTTP 服务提供，只监听 127.0.0.1，API 要求地址里的一次性令牌；它调用的就是上面的终端命令，不多一套逻辑。
 
