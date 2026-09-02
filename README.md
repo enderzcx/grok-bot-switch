@@ -1,97 +1,78 @@
 # Grok Bot Switch
 
-仓库：[`enderzcx/grok-bot-switch`](https://github.com/enderzcx/grok-bot-switch) · 独立模式预览版
+让 Grok Bot 用你自己的模型 API（OpenAI Chat / OpenAI Responses / Anthropic Messages 兼容接口）。一个文件，一条命令，切换不用重启。非 xAI / X 官方项目。
 
-一个不绑定供应商的 Grok Bot 通道管理工具：保存兼容服务的 URL、模型和 API key，明确选择协议，在官方通道与外部通道之间切换。非 xAI / X 官方项目。
+## 原理
 
-用户只需把[安装提示词](docs/install-with-grok.md)交给 Grok Bot。它会下载固定版本、先校验再安装，在自己的云端启动管理面板。然后从原版 Grok Bot 的云端桌面进入面板，填写供应商配置并切换。
+Grok Bot 的推理请求不是从你的 Mac/Windows 发出的，而是从它的云端 Linux 电脑里的主程序 `/home/box/sand-host/host-main.cjs` 发出的。本工具把一段包装代码接到主程序创建推理会话的地方；每次新建会话时读一遍 `/workspace/grok-switch/config.json`：
 
-不需要用户上传安装包、安装本机 Switch、配置 SSH/Tailscale、另建服务器或使用我们的服务。本版只提供独立模式，自建/托管中继后续再做。完整条件、数据边界和恢复方式见[独立模式说明](docs/independent-mode.md)。
+- 没有选中的供应商 → 走官方 Grok，行为不变。
+- 选中了供应商 → 直接从云端 `fetch` 你的 API，带上 key；请求、流式回复、工具调用、推理内容都按协议转换。
 
-**这是预览版，不是稳定版。** 独立模式已验证新建 Bot 的普通聊天、三条外部生产回执和恢复官方，见[本版验收记录](docs/independent-acceptance.md)。已有复杂工具/图片历史的会话存在失败记录，建议从新建 Bot 开始。仅支持经过校验的云端版本，未知版本拒绝切换；供应商 OAuth 尚未实现。旧 Windows 预览版的[历史验收记录](docs/native-client-rollout.md)与本版分开。
+因为路由是每次会话时决定的，切换供应商、切回官方只是改配置文件，**不需要重启**。只有第一次打补丁（以及 Grok Bot 升级覆盖了主程序之后重新打补丁）需要重启一次主程序，重启由 Grok 自带的 supervisor 在没有 Bot 忙碌时执行。
 
-## 使用与源码开发
+## 安装与使用
 
-最新修复预览版：`v0.3.0-beta.2`。修复面板停止误报、启动完整性校验和忙碌状态误报，见 [s-r 审阅记录](docs/sr-0.3.0-beta.2.md)。
+在 Grok Bot 的云端终端里（不是你本机）：
 
-普通用户使用[安装提示词](docs/install-with-grok.md)，第一次由 Grok Bot 执行安装可能消耗官方额度。密钥只在云端面板密码框中填写，不要粘贴到聊天。
+```sh
+mkdir -p /workspace/grok-switch
+curl -fsSL https://raw.githubusercontent.com/enderzcx/grok-bot-switch/main/dist/grok-switch.cjs -o /workspace/grok-switch/grok-switch.cjs
+alias gs='node /workspace/grok-switch/grok-switch.cjs'
 
-[旧 Windows 预览版 v0.2.0-beta.1](https://github.com/enderzcx/grok-bot-switch/releases/tag/v0.2.0-beta.1)属于历史客户端适配方案，不是本版独立模式安装入口。以下 CLI 命令供开发和本地配置检查，不能在用户电脑上直接控制独立云端。
-
-Python 3.10+；运行协议/host 测试另需 Node.js。Python 服务不需要第三方包，React 前端及依赖已打包在仓库内。在仓库目录运行：
-
-```bash
-python3 -m grokctl --home runtime/operator-state ui
+gs use myapi --url https://api.example.com/v1 --model gpt-5 --key sk-xxx
+gs status
 ```
 
-打开输出的 `http://127.0.0.1:<port>` 地址。面板可以添加供应商、单独安装密钥、显示完整请求端点和检查配置。点击“使用”或“切回上一通道”后自动检查切换条件，通过才执行，不再弹出确认框；失败原因就地显示。删除供应商和移除密钥仍需确认。按 Ctrl+C 关闭。面板不监听外网，写操作要求会话令牌；密钥写入后不再返回浏览器。
+`use` 会保存供应商、把主程序打上补丁（原文件备份为 `host-main.cjs.grok-switch.orig`）、请求一次重启。重启完成后新对话就走你的 API。之后：
 
-CLI 使用相同服务和数据：
-
-```bash
-python3 -m grokctl --home runtime/operator-state providers add --file config/custom-provider.example.json
-python3 -m grokctl --home runtime/operator-state providers list
-python3 -m grokctl --home runtime/operator-state test custom-openai
-python3 -m grokctl --home runtime/operator-state plan custom-openai
-python3 -m grokctl --home runtime/operator-state status --json
+```sh
+gs test myapi        # 真发一条小请求，看能不能通、回什么、花多少 token
+gs official          # 切回官方 Grok，下一轮对话生效，供应商配置保留
+gs use myapi         # 再切回来，同样下一轮生效
+gs log               # 最近的上游请求：状态码、耗时、token、错误原因
+gs restore           # 彻底卸载：去掉补丁并重启，恢复原厂主程序
 ```
 
-需要安装密钥时，使用面板密码框，或 `secret set <profile> --stdin` 从安全输入源读取；不要把真实 key 放到命令参数、配置 JSON 或 shell 历史中。示例配置不含密钥，也不会自动发送请求。
+也可以让 Grok Bot 代劳下载，把下面这段发给它即可：
 
-未指定 `--home` 时使用 `GROKCTL_HOME`，再回退到 `~/.grokctl`。本仓库验收始终使用 `runtime/` 或临时目录；不会改变系统 `HOME` 或现有 Grok 登录态。
+> 在你的云端电脑执行 `mkdir -p /workspace/grok-switch && curl -fsSL https://raw.githubusercontent.com/enderzcx/grok-bot-switch/main/dist/grok-switch.cjs -o /workspace/grok-switch/grok-switch.cjs && node /workspace/grok-switch/grok-switch.cjs status`，把输出原样发给我，不要运行其它命令。
 
-## 协议不是供应商
+之后的 `use` 命令建议自己在云端终端敲，这样 API key 不经过聊天记录。如果让 Bot 执行 `use`，它自己的这一轮会话还在运行，重启会等它回答结束后进行。key 也可以用 `--key-file <path>` 或环境变量 `GROK_SWITCH_API_KEY` 传入。
 
-| 协议 | 示例根地址 | 默认请求端点 |
-|---|---|---|
-| `openai-chat` | `https://api.example.com/v1` | `POST /v1/chat/completions` |
-| `openai-responses` | `https://api.example.com/v1` | `POST /v1/responses` |
-| `anthropic-messages` | `https://api.example.com/v1` | `POST /v1/messages` |
+## 命令
 
-高级 `endpointPath` 替换协议的默认接口后缀，再追加到根地址路径。例如根地址含 `/v1`、接口路径为 `/custom/chat` 时，最终为 `/v1/custom/chat`；若要完全指定路径，根地址只填域名。query 参数保留在最终 URL 末尾。程序不会猜协议，也不会在协议失败后换另一种重试。具体模型是否支持工具、推理或图像仍取决于供应商能力；不支持的语义应报错，不能假装兼容。
+| 命令 | 作用 |
+|---|---|
+| `use <name> [选项]` | 切到某个供应商；带选项时先保存/更新它。必要时打补丁并请求重启 |
+| `official` | 切回官方 Grok，配置保留 |
+| `add <name> <选项>` / `remove <name>` | 保存或删除供应商，不切换 |
+| `list` | 列出供应商和当前选中项 |
+| `status [--json]` | 主程序是否打补丁、进程是否已重启到新代码、supervisor 状态、当前路由、最近请求 |
+| `test <name> [--json]` | 向供应商发一条测试请求 |
+| `log [N]` | 最近 N 条上游请求记录 |
+| `restart` | 主动请求 supervisor 重启主程序 |
+| `restore` | 去掉补丁、恢复原厂主程序并重启 |
 
-`official` 是内置的原厂通道，不等于 xAI API key 通道。xAI 或任何其他兼容 API 都作为普通自定义 profile 配置。认证支持 `none`、`bearer`、`x-api-key`；`oauth-adapter` 目前仅保留显式契约并阻止未接入的适配器，不接受通用 OAuth token 导入。
+供应商选项：`--url`（根地址）、`--model`、`--protocol openai-chat|openai-responses|anthropic-messages`（默认 openai-chat）、`--key` / `--key-file`、`--auth bearer|x-api-key|none`、`--endpoint /自定义/路径`、`--header 'Name: value'`（可重复）、`--reasoning low|medium|high`、`--max-tokens N`（Anthropic 默认 8192）。
 
-## 安全与真实边界
+请求地址 = `--url` + 协议默认路径（`/chat/completions`、`/responses`、`/messages`），`--endpoint` 可以替换默认路径。例如 `--url https://api.example.com/v1` 会请求 `https://api.example.com/v1/chat/completions`。
 
-- 外部模式所有推理 session 均路由到 loopback hop；失败不自动回落到官方。
-- 推理请求由 hop 添加 key；host 的推理配置不含凭据。配置和 secret 分文件、仅当前用户可读写；密钥不会回显给界面。
-- 当前通道与恢复流程引用中的密钥禁止原地轮换或删除；需要更换时新建通道再切换。切回官方不会删除已保存密钥。
-- HTTPS 外部 URL、明确的请求路径、安全请求头、DNS/IP 检查和禁止重定向共同约束上游；这不是任意 URL 代理。
-- host 补丁仅对固定的已知 bundle hash 与唯一锚点编译；未知版本拒绝。独立模式不修改 Windows/Mac 的原版安装，用户点击切换时才适配云端主程序；并非整个系统完全无侵入。
-- 切换影响当前云端的所有 Bot。地址和供应商密钥会提交到该云端的私有目录；原有账号凭据留在原生客户端进程内。
-- 切换结果必须经过原生重启回执、新进程身份和健康状态确认。等待中的命令不强制重启；不确定的结果停止后续切换。外部模式暂不支持原生语音转写，不回退官方语音。
-- `host configure` 当前只接受 `lab-local-root`，明确显示 `lab-synthetic`；默认禁止模拟 apply。即使测试显式开启模拟 apply，也不会重启真实 Grok Bot。
-- `switch-back`（兼容别名 `rollback`）校验上一份回执/快照后，按当前 profile 重新发起切换，**不是按历史快照原样恢复**。事务执行失败时的内部恢复另有快照保护。
-- `test --live`、`verify --live` 尚未接入，会明确报错。不宣称原生额度为零，也不宣称任何第三方已完成生产兼容验收。
-- 当前单次 host 请求截止时间为 120 秒；成功响应总量上限 64 MiB、单个 SSE 事件 1 MiB。超过限制明确失败，不换供应商重试。
+## 边界与注意
 
-## 验证与下一阶段
+- 切换影响同一云端上的所有 Bot；语音转写、标题生成等非推理功能在外部模式下不走供应商（标题/标注回调被跳过，语音仍走官方）。
+- 配置文件包含 API key，权限 600，只对当前云端用户可读。请求日志不含 key。
+- 选中供应商后如果请求失败（key 错、余额不足、供应商挂了），对话直接报错并写入 `log`，**不会**悄悄回落到官方计费。
+- 补丁只依赖主程序里 `createHostInference` 这一个函数名，Grok Bot 升级一般不需要改本工具；升级会覆盖主程序、补丁丢失，`status` 会提示，再跑一次 `use <name>` 即可。如果某个新版本改了这个结构，`use` 会拒绝并保持原文件不动。
+- 写入前会 `node --check` 校验补丁后的文件；`restore` 后主程序与原文件逐字节一致。
+- 已知未解决：某些带大量工具/图片历史的旧对话切到外部协议后可能失败，建议先在新建的 Bot 里验证。
 
-### CC Switch 前端源码移植
+## 开发
 
-当前面板直接移植并改造自 CC Switch 的 React 源码，不再维护此前手写的 HTML/JS 面板。包含 15 份原样组件/工具源码，以及适配 Grok Bot 的供应商卡片、操作区和全屏表单。保留上游主题和交互，数据调用改接 `grokctl`，不带入 Tauri 或其它客户端的配置写入逻辑。
-
-来源、固定 commit 和改造清单见 [frontend/UPSTREAM.md](frontend/UPSTREAM.md)；版权和依赖声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-
-修改前端后使用 Node 20.19+ 或 22.12+ 在 `frontend/` 执行：
-
-```bash
-npm ci
-npm test
-npm run build
+```sh
+npm test        # 构建 dist/grok-switch.cjs 并运行全部测试（无第三方依赖，Node 20+）
 ```
 
-构建产物写入 `grokctl/web/`。普通使用者运行 Python CLI 即可，无需启动 Vite 或安装 Tauri。
+`src/protocols/` 是三种协议的转换器，`src/runtime.cjs` 是注入主程序的路由/流式代码，`src/cli.cjs` 是命令行；`build.mjs` 把它们拼成 `dist/grok-switch.cjs`。测试把构建产物的注入段加载到模拟的主程序作用域里运行，并对一个合成主程序（本地有真实主程序时也会对它）执行打补丁、重启请求、恢复的完整流程。
 
-### 后端验证
-
-```bash
-python3 -m unittest discover -s tests
-node --test tests/*.test.mjs
-python3 -m grokctl --help
-```
-
-[完整实现合同](docs/provider-switcher-v0.1.md)包含产品形态、模块职责、安全边界、验收矩阵和真实上线门槛；[本轮交付记录](docs/provider-switcher-local-evidence.md)记录本地证据及尚未完成项。
-
-剩余公开发布门槛包括签名/安装器、升级兼容矩阵和更多供应商协议实测。原生用量界面此次前后均为 100%，不能用这个粗粒度读数证明原生扣费精确为零。BeefAPI 仅用于这次验收；专用实验管理脚本不随桌面包发布，不是通用核心依赖。
+MIT License。

@@ -1,0 +1,276 @@
+// End-to-end tests of dist/grok-switch.cjs against a synthetic host layout:
+// a small fake host-main.cjs, a fake /proc, a fake supervisor directory and a
+// local HTTP server that speaks OpenAI Chat SSE.
+import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+const DIST = path.join(root, "dist", "grok-switch.cjs");
+const REAL_BUNDLE = process.env.GROK_SWITCH_REAL_BUNDLE || path.join(root, "..", "grok_home", "research", "current-0.30", "host-main.cjs");
+
+// Mirrors the shape of the real bundle around the anchors we rely on.
+const FAKE_BUNDLE = `"use strict";
+var BasePromptBuilder, BasePromptExecutor;
+BasePromptBuilder = class { constructor(m) { this.m = m || []; } getMessages() { return this.m; } };
+BasePromptExecutor = class { constructor(b) { this.b = b; } getMessages() { return this.b.getMessages(); } };
+function createCursorSandInference(options2) {
+  return { createSession(onRequestId, sessionOptions) { return { official: true }; }, recordPostTurnLabeling(args) {} };
+}
+// src/host/extensions/inference/inference-service.ts
+function createHostInference(options2) {
+  const { auth: auth2, experiments, settings } = options2;
+  return createCursorSandInference({ getAccessToken: auth2.getAccessToken });
+}
+module.exports = { createHostInference };
+`;
+
+function makeEnv() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-switch-test-"));
+  const hostDir = path.join(dir, "sand-host");
+  const proc = path.join(dir, "proc");
+  fs.mkdirSync(hostDir);
+  fs.mkdirSync(path.join(proc, "4242"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "sup"));
+  const host = path.join(hostDir, "host-main.cjs");
+  fs.writeFileSync(host, FAKE_BUNDLE);
+  fs.writeFileSync(path.join(hostDir, "version"), "17184bb\n");
+  const past = new Date(Date.now() - 3 * 3600 * 1000);
+  fs.utimesSync(host, past, past);
+  fs.writeFileSync(path.join(proc, "4242", "cmdline"), `node\0${host}\0`);
+  fs.writeFileSync(path.join(proc, "4242", "stat"), "4242 (node) S 1 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 360000 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+  fs.writeFileSync(path.join(proc, "stat"), `cpu 0 0 0 0\nbtime ${Math.floor(Date.now() / 1000) - 7200}\n`);
+  return {
+    dir,
+    host,
+    env: {
+      ...process.env,
+      GROK_SWITCH_HOST: host,
+      GROK_SWITCH_SUPERVISOR_DIR: path.join(dir, "sup"),
+      GROK_SWITCH_PROC: proc,
+      GROK_SWITCH_DIR: path.join(dir, "cfg")
+    }
+  };
+}
+
+function run(env, ...args) {
+  const result = spawnSync(process.execPath, [DIST, ...args], { env, encoding: "utf8" });
+  return { code: result.status, out: result.stdout, err: result.stderr };
+}
+
+// Async variant for tests that host an HTTP server in this process; spawnSync
+// would block the event loop the server needs.
+function runAsync(env, ...args) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [DIST, ...args], { env });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (chunk) => (out += chunk));
+    child.stderr.on("data", (chunk) => (err += chunk));
+    child.on("close", (code) => resolve({ code, out, err }));
+  });
+}
+
+function nodeCheck(file) {
+  return spawnSync(process.execPath, ["--check", file], { encoding: "utf8" }).status === 0;
+}
+
+function startFakeOpenAi(onRequest) {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        const reply = onRequest(req, JSON.parse(body));
+        if (reply.status !== 200) {
+          res.writeHead(reply.status, { "content-type": "application/json" });
+          res.end(JSON.stringify(reply.body));
+          return;
+        }
+        res.writeHead(200, { "content-type": "text/event-stream", "x-request-id": "fake-req-9" });
+        res.write(`data: ${JSON.stringify({ id: "c1", choices: [{ index: 0, delta: { content: "OK" } }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ id: "c1", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 12, completion_tokens: 1, total_tokens: 13 } })}\n\n`);
+        res.end("data: [DONE]\n\n");
+      });
+    });
+    server.listen(0, "127.0.0.1", () => resolve({ server, port: server.address().port }));
+  });
+}
+
+test("use patches the host, requests a restart, and status/list/official/restore round-trip", () => {
+  const { dir, host, env } = makeEnv();
+  const original = fs.readFileSync(host, "utf8");
+
+  let r = run(env, "status");
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /not patched/);
+  assert.match(r.out, /pid 4242 .* running current bundle/);
+  assert.match(r.out, /active {6}: official Grok/);
+
+  r = run(env, "use", "beef", "--url", "https://api.example.com/v1", "--model", "gpt-5", "--key", "sk-1");
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /active provider: beef/);
+  assert.match(r.out, /host bundle patched/);
+  assert.match(r.out, /restart requested/);
+  const patched = fs.readFileSync(host, "utf8");
+  assert.ok(patched.includes("// GROK_SWITCH_BEGIN"));
+  assert.ok(patched.includes("function __grokSwitchOriginalCreateHostInference(options2)"));
+  assert.equal(patched.split("function createHostInference(").length, 2, "exactly one createHostInference");
+  assert.ok(nodeCheck(host));
+  assert.equal(fs.readFileSync(host + ".grok-switch.orig", "utf8"), original);
+  const command = JSON.parse(fs.readFileSync(path.join(dir, "sup", "command.json"), "utf8"));
+  assert.equal(command.kind, "restart");
+  const config = JSON.parse(fs.readFileSync(path.join(dir, "cfg", "config.json"), "utf8"));
+  assert.equal(config.active, "beef");
+  assert.equal(config.providers.beef.apiKey, "sk-1");
+  assert.equal(fs.statSync(path.join(dir, "cfg", "config.json")).mode & 0o777, 0o600);
+
+  // The patched fake bundle must still load and expose the wrapped factory.
+  const loaded = spawnSync(process.execPath, ["-e", `
+    const m = require(${JSON.stringify(host)});
+    const inf = m.createHostInference({ auth: {}, experiments: {}, settings: {} });
+    process.stdout.write(typeof inf.createSession + " " + typeof grokSwitchWrapHostInference);
+  `], { encoding: "utf8" });
+  assert.equal(loaded.stdout, "function undefined", loaded.stderr);
+
+  r = run(env, "status");
+  assert.match(r.out, /patched \(0\.\d+\.\d+\)/);
+  assert.match(r.out, /RESTART PENDING/);
+  assert.match(r.out, /command pending \(grok-switch-\d+\)/);
+  assert.match(r.out, /active {6}: beef -> openai-chat https:\/\/api\.example\.com\/v1\/chat\/completions model=gpt-5/);
+
+  // Second use is idempotent on the bundle and does not double-issue commands.
+  r = run(env, "use", "beef");
+  assert.equal(r.code, 0, r.err);
+  assert.doesNotMatch(r.out, /host bundle patched/);
+  assert.match(r.out, /already pending/);
+  assert.equal(fs.readFileSync(host, "utf8"), patched);
+
+  r = run(env, "add", "claude", "--protocol", "anthropic-messages", "--url", "https://c.example.com", "--model", "claude-x", "--key", "ak");
+  assert.equal(r.code, 0, r.err);
+  r = run(env, "list");
+  assert.match(r.out, /^\* beef /m);
+  assert.match(r.out, /^ {2}claude {2}anthropic-messages https:\/\/c\.example\.com\/messages model=claude-x/m);
+  r = run(env, "list", "--json");
+  assert.equal(JSON.parse(r.out).providers.beef.apiKey, "***");
+
+  r = run(env, "remove", "beef");
+  assert.equal(r.code, 1);
+  assert.match(r.err, /is the active provider/);
+
+  r = run(env, "official");
+  assert.equal(r.code, 0, r.err);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "cfg", "config.json"), "utf8")).active, null);
+  r = run(env, "remove", "beef");
+  assert.equal(r.code, 0, r.err);
+
+  r = run(env, "restore");
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /patch removed/);
+  assert.equal(fs.readFileSync(host, "utf8"), original);
+  assert.equal(fs.existsSync(host + ".grok-switch.orig"), false);
+  r = run(env, "restore");
+  assert.match(r.out, /nothing to restore/);
+});
+
+test("use refuses bundles without the anchors and leaves them untouched", () => {
+  const { host, env } = makeEnv();
+  fs.writeFileSync(host, FAKE_BUNDLE.replace("function createHostInference(", "function createHostInferenceRenamed("));
+  const before = fs.readFileSync(host, "utf8");
+  const r = run(env, "use", "x", "--url", "https://a.example.com", "--model", "m", "--key", "k");
+  assert.equal(r.code, 1);
+  assert.match(r.err, /createHostInference definitions \(expected 1\)/);
+  assert.equal(fs.readFileSync(host, "utf8"), before);
+  assert.equal(fs.existsSync(host + ".grok-switch.orig"), false);
+});
+
+test("a host update that replaces the patched bundle is detected and re-patched", () => {
+  const { host, env } = makeEnv();
+  let r = run(env, "use", "p", "--url", "https://a.example.com", "--model", "m", "--key", "k");
+  assert.equal(r.code, 0, r.err);
+  fs.writeFileSync(host, FAKE_BUNDLE.replace("17184bb", "newver"));
+  r = run(env, "status");
+  assert.match(r.out, /not patched/);
+  assert.match(r.out, /warning .*run `use p` to re-apply/);
+  fs.rmSync(path.join(env.GROK_SWITCH_SUPERVISOR_DIR, "command.json"));
+  r = run(env, "use", "p");
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /host bundle patched/);
+  assert.match(r.out, /restart requested/);
+});
+
+test("validation errors are reported without touching the host or config", () => {
+  const { host, env } = makeEnv();
+  const before = fs.readFileSync(host, "utf8");
+  let r = run(env, "use", "p", "--url", "https://a.example.com", "--model", "m");
+  assert.equal(r.code, 1);
+  assert.match(r.err, /apiKey is required/);
+  r = run(env, "use", "p", "--url", "nope", "--model", "m", "--key", "k");
+  assert.match(r.err, /baseUrl is not a valid URL/);
+  r = run(env, "use", "bad name", "--url", "https://a.example.com", "--model", "m", "--key", "k");
+  assert.match(r.err, /provider name must be/);
+  r = run(env, "use", "p", "--url", "https://a.example.com", "--model", "m", "--key", "k", "--protocol", "grpc");
+  assert.match(r.err, /protocol must be one of/);
+  assert.equal(fs.readFileSync(host, "utf8"), before);
+  assert.equal(fs.existsSync(path.join(env.GROK_SWITCH_DIR, "config.json")), false);
+  r = run({ ...env, GROK_SWITCH_API_KEY: "from-env" }, "add", "p", "--url", "https://a.example.com", "--model", "m");
+  assert.equal(r.code, 0, r.err);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "config.json"), "utf8")).providers.p.apiKey, "from-env");
+});
+
+test("test command sends a real request and log shows it", async () => {
+  const { env } = makeEnv();
+  const seen = [];
+  const { server, port } = await startFakeOpenAi((req, body) => {
+    seen.push({ url: req.url, auth: req.headers.authorization, body });
+    return body.model === "bad" ? { status: 401, body: { error: { message: "bad key" } } } : { status: 200 };
+  });
+  try {
+    let r = run(env, "add", "local", "--url", `http://127.0.0.1:${port}/v1`, "--model", "m1", "--key", "k1");
+    assert.equal(r.code, 0, r.err);
+    r = await runAsync(env, "test", "local");
+    assert.equal(r.code, 0, r.err + r.out);
+    assert.match(r.out, /^OK in \d+ms via openai-chat http:\/\/127\.0\.0\.1:\d+\/v1\/chat\/completions model=m1/);
+    assert.match(r.out, /reply: "OK"/);
+    assert.match(r.out, /usage: 12 prompt \+ 1 completion tokens/);
+    assert.equal(seen[0].url, "/v1/chat/completions");
+    assert.equal(seen[0].auth, "Bearer k1");
+    assert.equal(seen[0].body.stream, true);
+
+    r = run(env, "add", "broken", "--url", `http://127.0.0.1:${port}/v1`, "--model", "bad", "--key", "k1");
+    r = await runAsync(env, "test", "broken", "--json");
+    assert.equal(r.code, 1);
+    const json = JSON.parse(r.out);
+    assert.equal(json.ok, false);
+    assert.match(json.error, /HTTP 401: bad key/);
+
+    r = run(env, "log");
+    const lines = r.out.trim().split("\n");
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /local {2}m1 {2}test {2}HTTP 200 .*tokens 12\+1/);
+    assert.match(lines[1], /broken {2}bad {2}test {2}HTTP 401 .*ERROR .*bad key/);
+    assert.doesNotMatch(r.out, /k1/);
+  } finally {
+    server.close();
+  }
+});
+
+test("patches the real Grok Bot bundle when it is available locally", { skip: !fs.existsSync(REAL_BUNDLE) && "real bundle not present" }, () => {
+  const { host, env } = makeEnv();
+  fs.copyFileSync(REAL_BUNDLE, host);
+  const original = fs.readFileSync(host);
+  let r = run(env, "use", "p", "--url", "https://a.example.com", "--model", "m", "--key", "k");
+  assert.equal(r.code, 0, r.err);
+  assert.ok(nodeCheck(host));
+  const patched = fs.readFileSync(host, "utf8");
+  assert.equal(patched.split("\nfunction createHostInference(").length, 2);
+  assert.equal(patched.split("\nfunction __grokSwitchOriginalCreateHostInference(").length, 2);
+  r = run(env, "restore");
+  assert.equal(r.code, 0, r.err);
+  assert.ok(fs.readFileSync(host).equals(original), "restore must be byte-exact");
+});
