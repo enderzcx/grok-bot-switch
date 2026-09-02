@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// grok-switch 0.6.2 - https://github.com/enderzcx/grok-bot-switch
+// grok-switch 0.6.3 - https://github.com/enderzcx/grok-bot-switch
 // Single-file build. Do not edit; regenerate with `node build.mjs`.
 "use strict";
 // GROK_SWITCH_PAYLOAD_BEGIN
@@ -1636,6 +1636,7 @@ var sse = require("./sse.cjs");
 var tools = require("./tools.cjs");
 
 var PROTOCOL_ID = "openai-responses";
+var REASONING_MODEL = /^(gpt-5|o1|o3|o4|codex)/i;
 
 var HOSTED_ITEM_TYPES = {
   web_search_call: true,
@@ -1823,9 +1824,15 @@ function buildRequest(request, options) {
   if (maxTokens != null) {
     body.max_output_tokens = maxTokens;
   }
+  // Ask for reasoning summaries so thinking streams as it happens. The Grok
+  // Bot host treats a stream with no delta for 150s as stalled and retries
+  // (billing again); a reasoning model that only emits text at the end would
+  // trip that. Only reasoning-capable model families accept `reasoning`.
   var effort = contract.reasoningEffortFrom(request);
   if (effort != null) {
-    body.reasoning = { effort: effort };
+    body.reasoning = { effort: effort, summary: "auto" };
+  } else if (REASONING_MODEL.test(request.model)) {
+    body.reasoning = { summary: "auto" };
   }
   return {
     method: "POST",
@@ -3937,7 +3944,10 @@ function grokSwitchStream(provider, input) {
         } catch (interpreted) {
           if (interpreted != null && interpreted.message) message = "HTTP " + status + ": " + interpreted.message;
         }
-        throw new Error("grok-switch: " + provider.name + " (" + provider.model + ") " + message);
+        var httpError = new Error("grok-switch: " + provider.name + " (" + provider.model + ") " + message);
+        // 4xx other than timeout/rate-limit will fail the same way on retry.
+        httpError.grokSwitchFatal = status >= 400 && status < 500 && status !== 408 && status !== 429;
+        throw httpError;
       }
       var decoder = adapter.createStreamDecoder({ requestId: headerRequestId || "" });
       var bounds = grokSwitchResponseBounds();
@@ -3975,6 +3985,16 @@ function grokSwitchStream(provider, input) {
     } catch (error) {
       var err = grokSwitchAsError(error);
       log(err);
+      // The host retries any unknown error up to three times, re-billing the
+      // provider each time. Failures that cannot succeed on retry (4xx,
+      // request shapes the protocol cannot express) are surfaced as visible
+      // text first: once the turn has produced output the host stops retrying
+      // and shows the error immediately.
+      var fatal = err.grokSwitchFatal === true
+        || (err.name === "ProtocolError" && (err.code === "unsupported-shape" || err.code === "invalid-request"));
+      if (fatal && text.length === 0 && toolCalls.length === 0) {
+        pump.push({ type: "text-delta", textDelta: "⚠️ " + err.message });
+      }
       pump.push({ type: "error", error: err });
       usageSlot.reject(err);
       extendedSlot.reject(err);
@@ -4006,6 +4026,7 @@ function grokSwitchFailedStream(message) {
   var rejected = Promise.reject(error);
   rejected.catch(function () {});
   var pump = grokSwitchPump();
+  pump.push({ type: "text-delta", textDelta: "⚠️ " + error.message });
   pump.push({ type: "error", error: error });
   pump.fail(error);
   return {
@@ -4589,7 +4610,7 @@ var cliFs = require("node:fs");
 var cliPath = require("node:path");
 var cliChildProcess = require("node:child_process");
 
-var CLI_VERSION = "0.6.2";
+var CLI_VERSION = "0.6.3";
 var CLI_HOST_PATH = process.env.GROK_SWITCH_HOST || "/home/box/sand-host/host-main.cjs";
 var CLI_HOST_VERSION_PATH = cliPath.join(cliPath.dirname(CLI_HOST_PATH), "version");
 var CLI_BACKUP_PATH = CLI_HOST_PATH + ".grok-switch.orig";

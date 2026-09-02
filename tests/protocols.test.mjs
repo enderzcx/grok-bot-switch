@@ -386,7 +386,7 @@ test("reasoningEffort maps losslessly for OpenAI protocols only", () => {
   const chat = protocols.getAdapter("openai-chat").buildRequest(request);
   const responses = protocols.getAdapter("openai-responses").buildRequest(request);
   assert.equal(chat.body.reasoning_effort, "high");
-  assert.deepEqual(responses.body.reasoning, { effort: "high" });
+  assert.deepEqual(responses.body.reasoning, { effort: "high", summary: "auto" });
 });
 
 test("user images map without flattening, Anthropic version stays non-credential metadata", () => {
@@ -733,6 +733,16 @@ const OFFICIAL_HISTORY = [
   { role: "assistant", content: "" },
   { role: "user", content: [{ type: "text", text: "What do you see?" }, { type: "image", image: "R0lGODlh" }] }
 ];
+
+test("Responses requests stream reasoning summaries for reasoning models", () => {
+  const adapter = protocols.getAdapter("openai-responses");
+  const base = { stream: true, messages: [{ role: "user", content: "hi" }] };
+  assert.deepEqual(adapter.buildRequest({ ...base, model: "gpt-5.4" }).body.reasoning, { summary: "auto" });
+  assert.deepEqual(adapter.buildRequest({ ...base, model: "o3-pro" }).body.reasoning, { summary: "auto" });
+  assert.deepEqual(adapter.buildRequest({ ...base, model: "gpt-4.1", parameters: { reasoningEffort: "high" } }).body.reasoning, { effort: "high", summary: "auto" });
+  assert.equal("reasoning" in adapter.buildRequest({ ...base, model: "gpt-4.1" }).body, false, "non-reasoning models get no reasoning field");
+  assert.equal("reasoning" in adapter.buildRequest({ ...base, model: "test-model" }).body, false);
+});
 
 test("tool call ids longer than 64 chars are shortened consistently for calls and results", () => {
   const longId = "toolu_" + "x".repeat(79);

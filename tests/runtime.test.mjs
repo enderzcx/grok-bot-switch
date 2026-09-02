@@ -278,6 +278,29 @@ test("upstream HTTP errors surface the provider's own message", async () => {
   const log = JSON.parse(files.get(LOG_PATH).trim());
   assert.equal(log.status, 401);
   assert.match(log.error, /Incorrect API key/);
+  // Deterministic failure: visible text precedes the error so the host does not retry (and re-bill).
+  assert.equal(out.events[0].type, "text-delta");
+  assert.match(out.events[0].textDelta, /^⚠️ grok-switch: main .*HTTP 401/);
+  assert.equal(out.events[1].type, "error");
+});
+
+test("rate limits and server errors stay retryable: no text is emitted before the error", async () => {
+  for (const status of [429, 500, 503]) {
+    const files = new Map([[CONFIG_PATH, config("main", { main: OPENAI })]]);
+    const host = loadHost({ files, fetchImpl: () => jsonFailure(status, { error: { message: "later" } }) });
+    const out = await drain(host.inference.createSession(null, {}).getExecutor([{ role: "user", content: "x" }]).stream({}, "i", [], {}));
+    assert.equal(out.events[0].type, "error", "status " + status);
+    assert.match(out.streamError.message, new RegExp("HTTP " + status));
+  }
+});
+
+test("shapes the protocol cannot express fail fast with visible text", async () => {
+  const files = new Map([[CONFIG_PATH, config("main", { main: OPENAI })]]);
+  const host = loadHost({ files, fetchImpl: () => assert.fail("no request expected") });
+  const out = await drain(host.inference.createSession(null, {}).getExecutor([{ role: "user", content: [{ type: "video", data: "x" }] }]).stream({}, "i", [], {}));
+  assert.equal(out.events[0].type, "text-delta");
+  assert.match(out.events[0].textDelta, /User content is unrepresentable/);
+  assert.equal(host.fetches.length, 0);
 });
 
 test("anthropic providers get x-api-key, anthropic-version and a default max_tokens", async () => {

@@ -923,7 +923,10 @@ function grokSwitchStream(provider, input) {
         } catch (interpreted) {
           if (interpreted != null && interpreted.message) message = "HTTP " + status + ": " + interpreted.message;
         }
-        throw new Error("grok-switch: " + provider.name + " (" + provider.model + ") " + message);
+        var httpError = new Error("grok-switch: " + provider.name + " (" + provider.model + ") " + message);
+        // 4xx other than timeout/rate-limit will fail the same way on retry.
+        httpError.grokSwitchFatal = status >= 400 && status < 500 && status !== 408 && status !== 429;
+        throw httpError;
       }
       var decoder = adapter.createStreamDecoder({ requestId: headerRequestId || "" });
       var bounds = grokSwitchResponseBounds();
@@ -961,6 +964,16 @@ function grokSwitchStream(provider, input) {
     } catch (error) {
       var err = grokSwitchAsError(error);
       log(err);
+      // The host retries any unknown error up to three times, re-billing the
+      // provider each time. Failures that cannot succeed on retry (4xx,
+      // request shapes the protocol cannot express) are surfaced as visible
+      // text first: once the turn has produced output the host stops retrying
+      // and shows the error immediately.
+      var fatal = err.grokSwitchFatal === true
+        || (err.name === "ProtocolError" && (err.code === "unsupported-shape" || err.code === "invalid-request"));
+      if (fatal && text.length === 0 && toolCalls.length === 0) {
+        pump.push({ type: "text-delta", textDelta: "⚠️ " + err.message });
+      }
       pump.push({ type: "error", error: err });
       usageSlot.reject(err);
       extendedSlot.reject(err);
@@ -992,6 +1005,7 @@ function grokSwitchFailedStream(message) {
   var rejected = Promise.reject(error);
   rejected.catch(function () {});
   var pump = grokSwitchPump();
+  pump.push({ type: "text-delta", textDelta: "⚠️ " + error.message });
   pump.push({ type: "error", error: error });
   pump.fail(error);
   return {

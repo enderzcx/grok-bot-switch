@@ -5,6 +5,7 @@ var sse = require("./sse.cjs");
 var tools = require("./tools.cjs");
 
 var PROTOCOL_ID = "openai-responses";
+var REASONING_MODEL = /^(gpt-5|o1|o3|o4|codex)/i;
 
 var HOSTED_ITEM_TYPES = {
   web_search_call: true,
@@ -192,9 +193,15 @@ function buildRequest(request, options) {
   if (maxTokens != null) {
     body.max_output_tokens = maxTokens;
   }
+  // Ask for reasoning summaries so thinking streams as it happens. The Grok
+  // Bot host treats a stream with no delta for 150s as stalled and retries
+  // (billing again); a reasoning model that only emits text at the end would
+  // trip that. Only reasoning-capable model families accept `reasoning`.
   var effort = contract.reasoningEffortFrom(request);
   if (effort != null) {
-    body.reasoning = { effort: effort };
+    body.reasoning = { effort: effort, summary: "auto" };
+  } else if (REASONING_MODEL.test(request.model)) {
+    body.reasoning = { summary: "auto" };
   }
   return {
     method: "POST",
