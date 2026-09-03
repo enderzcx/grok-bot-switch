@@ -136,23 +136,31 @@ function loadHost({ files = new Map(), fetchImpl } = {}) {
     },
     __grokSwitchOriginalCreateHostInference(options) {
       originalCalls.push(options);
+      // Mirrors the host: sessions are class instances whose methods live on
+      // the prototype, not own enumerable properties.
+      class OfficialSession {
+        constructor(onRequestId, sessionOptions) {
+          this.official = true;
+          this.onRequestId = onRequestId;
+          this.sessionOptions = sessionOptions;
+          this.requestedModel = { modelId: "grok-official" };
+        }
+        getModelId() {
+          return this.requestedModel.modelId;
+        }
+        getExecutor(state) {
+          const executor = new BasePromptExecutor(new BasePromptBuilder(state));
+          executor.stream = (...args) => {
+            originalCalls.push({ streamed: true, args });
+            const done = Promise.resolve({});
+            return { fullStream: (async function* () {})(), usage: done, extendedUsage: done, providerMetadata: done, invocationId: done, response: done };
+          };
+          return executor;
+        }
+      }
       return {
         resolvePrivacyMode: () => "official-privacy",
-        createSession: (onRequestId, sessionOptions) => ({
-          official: true,
-          onRequestId,
-          sessionOptions,
-          getModelId: () => "grok-official",
-          getExecutor(state) {
-            const executor = new BasePromptExecutor(new BasePromptBuilder(state));
-            executor.stream = (...args) => {
-              originalCalls.push({ streamed: true, args });
-              const done = Promise.resolve({});
-              return { fullStream: (async function* () {})(), usage: done, extendedUsage: done, providerMetadata: done, invocationId: done, response: done };
-            };
-            return executor;
-          }
-        }),
+        createSession: (onRequestId, sessionOptions) => new OfficialSession(onRequestId, sessionOptions),
         recordPostTurnLabeling: (args) => labelingCalls.push(["post", args]),
         recordFollowupLabeling: (args) => labelingCalls.push(["followup", args])
       };
@@ -198,6 +206,8 @@ test("without config.json every session goes to the original host inference", ()
   assert.equal(host.originalCalls.length, 1);
   const session = host.inference.createSession("rid", { requestSource: "main" });
   assert.equal(session.official, true);
+  assert.equal(session.getModelId(), "grok-official", "prototype methods of the host session survive wrapping");
+  assert.equal(typeof session.getExecutor, "function");
   assert.equal(host.inference.resolvePrivacyMode(), "official-privacy");
   host.inference.recordPostTurnLabeling({ a: 1 });
   assert.equal(host.labelingCalls.length, 1);

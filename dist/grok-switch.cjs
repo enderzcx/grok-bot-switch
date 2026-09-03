@@ -4256,17 +4256,17 @@ function grokSwitchCreateSession(route, onRequestId, sessionOptions) {
   };
 }
 
-// Official sessions only get the command interceptor; everything else is the
-// host's own object untouched.
+// Official sessions only get the command interceptor. The host's session may
+// be a class instance with methods on its prototype (getModelId etc.), so it
+// is modified in place rather than copied; the object is created fresh for
+// every createSession call.
 function grokSwitchWrapOfficialSession(session, sessionOptions) {
   if (session == null || typeof session.getExecutor !== "function" || !grokSwitchIsMainSession(sessionOptions)) return session;
-  var wrapped = {};
-  var keys = Object.keys(session);
-  for (var i = 0; i < keys.length; i += 1) wrapped[keys[i]] = session[keys[i]];
-  wrapped.getExecutor = function (state) {
-    return grokSwitchInterceptCommands(session.getExecutor(state));
+  var originalGetExecutor = session.getExecutor;
+  session.getExecutor = function (state) {
+    return grokSwitchInterceptCommands(originalGetExecutor.call(session, state));
   };
-  return wrapped;
+  return session;
 }
 
 // Wraps the object returned by the host's createHostInference. The route is
