@@ -767,10 +767,18 @@ function grokSwitchHasSuccessValue(value, depth) {
   return false;
 }
 
+// The host nudges a stuck model with synthetic user messages ("[SAND_HIDDEN_PROMPT]
+// ... deliver the result now"). Those belong to the same turn: a loop that
+// keeps failing across nudges must still accumulate.
+function grokSwitchIsHiddenPrompt(message) {
+  var text = grokSwitchLastUserText([message]);
+  return typeof text === "string" && /^\s*\[SAND_HIDDEN_PROMPT\]/.test(text);
+}
+
 function grokSwitchCurrentTurnStart(messages) {
   var start = 0;
   for (var i = 0; i < messages.length; i += 1) {
-    if (messages[i] != null && messages[i].role === "user") start = i + 1;
+    if (messages[i] != null && messages[i].role === "user" && !grokSwitchIsHiddenPrompt(messages[i])) start = i + 1;
   }
   return start;
 }
@@ -1090,9 +1098,16 @@ function grokSwitchStream(provider, input) {
         reasoning += event.textDelta;
       } else if (event.type === "tool-call-streaming-start") {
         pendingToolCalls.set(event.toolCallId, event.toolName);
+      } else if (event.type === "tool-call-delta") {
+        // The host executes tools from the accumulated delta text, not from
+        // the final `args`. Raw deltas would bypass argument normalization
+        // (SendToUser field scoping), so they are withheld and replaced by
+        // one delta carrying the final normalized JSON at completion.
+        return;
       } else if (event.type === "tool-call") {
         pendingToolCalls.delete(event.toolCallId);
         toolCalls.push({ toolCallId: event.toolCallId, toolName: event.toolName, args: event.args });
+        pump.push({ type: "tool-call-delta", toolCallId: event.toolCallId, toolName: event.toolName, argsTextDelta: JSON.stringify(event.args == null ? {} : event.args) });
       } else if (event.type === "error") {
         throw grokSwitchAsError(event.error);
       }

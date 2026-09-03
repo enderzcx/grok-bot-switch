@@ -364,6 +364,44 @@ test("repeated failed SendMessage calls trip one visible breaker without another
   assert.equal(second.events.at(-1).finishReason, "stop");
 });
 
+test("tool argument deltas reach the host only as the final normalized JSON", async () => {
+  const files = new Map([[CONFIG_PATH, config("main", { main: OPENAI })]]);
+  const raw = JSON.stringify({ to: "dm", type: "text", content: "hi", widget: { prompt: "?", options: [{ label: "a" }] }, secret: { label: "t", connector: "c", field: "f" } });
+  const chunks = [raw.slice(0, 20), raw.slice(20, 60), raw.slice(60)];
+  const stream = [
+    `data: ${JSON.stringify({ id: "c", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "SendToUser", arguments: chunks[0] } }] } }] })}`,
+    `data: ${JSON.stringify({ id: "c", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: chunks[1] } }] } }] })}`,
+    `data: ${JSON.stringify({ id: "c", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: chunks[2] } }] } }] })}`,
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}`,
+    "data: [DONE]"
+  ].join("\n\n") + "\n\n";
+  const host = loadHost({ files, fetchImpl: () => sse(stream) });
+  const out = await drain(host.inference.createSession(null, {}).getExecutor([{ role: "user", content: "x" }]).stream({}, "i", [], {}));
+  assert.equal(out.streamError, null);
+  const types = out.events.map((e) => e.type);
+  assert.deepEqual(types, ["tool-call-streaming-start", "tool-call-delta", "tool-call", "finish"]);
+  const delta = out.events[1];
+  const call = out.events[2];
+  assert.equal(delta.toolCallId, call.toolCallId);
+  assert.deepEqual(JSON.parse(delta.argsTextDelta), { to: "dm", type: "text", content: "hi" }, "the streamed text is the normalized args");
+  assert.deepEqual(plain(call.args), { to: "dm", type: "text", content: "hi" });
+  assert.equal(delta.argsTextDelta.includes("widget"), false);
+});
+
+test("host nudges ([SAND_HIDDEN_PROMPT]) do not reset the turn for loop detection", async () => {
+  const files = new Map([[CONFIG_PATH, config("main", { main: OPENAI })]]);
+  const host = loadHost({ files, fetchImpl: () => assert.fail("breaker must fire before any request") });
+  const fail = (id) => [
+    { role: "assistant", content: [{ type: "tool-call", toolCallId: id, toolName: "SendToUser", args: { type: "text", content: "x" } }] },
+    { role: "tool", content: [{ type: "tool-result", toolCallId: id, toolName: "SendToUser", result: '<cursor_untrusted_data_1337 source="SendToUser">\nFailed to send the message to the user: Invalid arguments:\nwidget: ... Nothing was sent.' }] }
+  ];
+  const nudge = { role: "user", content: [{ type: "text", text: "[SAND_HIDDEN_PROMPT]Your previous turn left the user without the result they're waiting on…" }] };
+  const messages = [{ role: "user", content: "你是什么模型" }, ...fail("a"), nudge, ...fail("b"), nudge];
+  const out = await drain(host.inference.createSession(null, { requestSource: "turn" }).getExecutor(messages).stream({}, "i", [], {}));
+  assert.equal(host.fetches.length, 0);
+  assert.match(out.events.find((e) => e.type === "tool-call").args.content, /连续 2 次用无效参数调用消息工具/);
+});
+
 test("any tool failing three times in a row, or three identical calls, trips the breaker; healthy tool loops continue", async () => {
   const provider = { ...OPENAI, model: "gpt-5.6-sol" };
   const text = fs.readFileSync(path.join(FIXTURES, "openai-chat", "text.sse"), "utf8");
