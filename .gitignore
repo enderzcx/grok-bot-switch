@@ -3,3 +3,4 @@ runtime/
 *.tmp
 .claude/
 panel/node_modules/
+.DS_Store
