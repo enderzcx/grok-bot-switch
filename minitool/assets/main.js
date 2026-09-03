@@ -11,7 +11,7 @@
     "anthropic-messages": "/messages"
   };
   var MODE_DESC = {
-    panel: "Grok Bot 装好后在它的云端电脑上打开一个配置面板，你在 Grok Bot 的云端桌面里自己填供应商、测试、切换，也可以在面板里用 ChatGPT 登录。API key 不经过聊天记录。",
+    panel: "Grok Bot 装好后在它的云端电脑上打开配置面板（地址固定为 127.0.0.1:18990），你在 Grok Bot 的云端桌面里选预设、拉模型列表、测试、切换。API key 不经过聊天记录。",
     direct: "把供应商信息写进提示词，Grok Bot 下载、测试、切换一步完成。留空的项它会在对话里问你。"
   };
 

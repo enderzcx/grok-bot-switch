@@ -43,7 +43,7 @@
           <button class="segment-item is-active" type="button" data-mode="panel">面板配置（推荐）</button>
           <button class="segment-item" type="button" data-mode="direct">直接配置</button>
         </div>
-        <p class="muted" id="mode-desc">Grok Bot 装好后在它的云端电脑上打开一个配置面板，你在 Grok Bot 的云端桌面里自己填供应商、测试、切换，也可以在面板里用 ChatGPT 登录。API key 不经过聊天记录。</p>
+        <p class="muted" id="mode-desc">Grok Bot 装好后在它的云端电脑上打开配置面板（地址固定为 127.0.0.1:18990），你在 Grok Bot 的云端桌面里自己填供应商、测试、切换。API key 不经过聊天记录。</p>
       </div>
 
       <div class="card" id="direct-form-card" hidden>
@@ -93,7 +93,8 @@
         <ol class="steps">
           <li>Grok Bot 下载工具、给它的云端主程序打补丁、申请一次重启。这一次重启在它回复完后由 Grok 自带的机制执行，几秒钟。</li>
           <li>面板模式：Bot 会说"面板已打开"，你在 Grok Bot 的云端桌面里操作面板；直接配置模式：Bot 先向你的接口发一条测试请求，通过后立刻切换。</li>
-          <li>新开一条消息试试。发 <code>/gs status</code> 可以确认当前走的是哪个模型。</li>
+          <li><b>建议给用外部模型的 Bot 关掉"本机执行"</b>：外部模型往往不指定目标机器，命令会默认跑到你自己的电脑上。</li>
+          <li>新开一条消息试试。直接问它"你是什么模型"会如实回答当前接入的模型；发 <code>/gs status</code> 也可以看。</li>
         </ol>
       </div>
     </section>
@@ -116,10 +117,12 @@
       <div class="card">
         <h2>面板里能做什么</h2>
         <ul class="list">
-          <li>添加、修改、删除供应商；保存时真发一条测试请求，地址、key、模型任何一个不对当场报出来</li>
-          <li>一键切换、切回官方、卸载补丁</li>
-          <li>用 ChatGPT 登录代替 API key</li>
+          <li>一排预设：OpenAI、DeepSeek、xAI、Kimi、通义千问、OpenRouter、Anthropic、自定义中转，点一下自动填好地址和协议</li>
+          <li>填好地址和 key 后自动拉取该接口的可用模型列表，选一个即可，不用手打模型 id</li>
+          <li>保存时真发一条测试请求，地址、key、模型任何一个不对当场报出来</li>
+          <li>一键切换、切回官方；"复制"一个供应商只改模型就是新来源</li>
           <li>看每个供应商累计用了多少次、多少 token，以及最近请求的状态和错误原因</li>
+          <li>用 ChatGPT 登录代替 API key（实验性）；卸载补丁</li>
         </ul>
       </div>
     </section>
@@ -127,8 +130,8 @@
     <!-- ChatGPT -->
     <section class="view" id="view-chatgpt">
       <div class="card">
-        <h2>用 ChatGPT 订阅，不用 API key</h2>
-        <p>用的是你 ChatGPT Plus / Pro 的额度。登录在你自己的手机或电脑上完成，云端只保存登录凭据，过期自动刷新。</p>
+        <h2>用 ChatGPT 订阅，不用 API key <span class="pill warn">实验性</span></h2>
+        <p>云端实测还少，遇到问题请反馈。用的是你 ChatGPT Plus / Pro 的额度。登录在你自己的手机或电脑上完成，云端只保存登录凭据，过期自动刷新。</p>
         <ol class="steps">
           <li>在面板里点"登录 ChatGPT"（云端没装 Codex CLI 的话先点"安装 Codex CLI"）。</li>
           <li>面板显示一个网址和一次性验证码。在你自己的浏览器里打开网址、输入验证码、登录 ChatGPT。</li>
@@ -167,6 +170,14 @@
         <details>
           <summary>已有的旧对话能直接切吗？</summary>
           <p>能。官方 Grok 产生的历史里有外部接口无法表达的内容（脱敏推理、带签名的推理、工具返回的截图、文件附件），会按规则降级而不是报错：脱敏推理丢弃，工具截图改用图片消息携带，附件替换成一行占位文字。</p>
+        </details>
+        <details>
+          <summary>换成别的模型后它还说自己是 Grok？</summary>
+          <p>不会。走外部模型时会在 Grok 的系统提示后附一句说明，告诉模型当前实际接入的是哪个模型；问它"你是什么模型"会如实回答，切换来源后随之更新。切回官方 Grok 不附加任何内容。</p>
+        </details>
+        <details>
+          <summary>模型一直"思考"、不回复，或者在同一个动作上反复打转？</summary>
+          <p>工具内置了保护：供应商返回确定性错误（key 错、余额不足等）会立刻显示原因、不重试；模型在同一轮里对同一个工具连续失败或反复发完全相同的调用会被熔断并给出提示，不会无限消耗额度。如果还是遇到，看面板"最近请求"里的记录，把错误原文反馈给我们。</p>
         </details>
         <details>
           <summary>哪些功能不走我的供应商？</summary>
