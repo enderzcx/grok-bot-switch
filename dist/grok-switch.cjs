@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// grok-switch 0.6.6 - https://github.com/enderzcx/grok-bot-switch
+// grok-switch 0.6.7 - https://github.com/enderzcx/grok-bot-switch
 // Single-file build. Do not edit; regenerate with `node build.mjs`.
 "use strict";
 // GROK_SWITCH_PAYLOAD_BEGIN
@@ -3089,6 +3089,10 @@ var GROK_SWITCH_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 var GROK_SWITCH_MAX_SSE_EVENT_BYTES = 4 * 1024 * 1024;
 var GROK_SWITCH_MAX_FAILURE_BODY_BYTES = 64 * 1024;
 var GROK_SWITCH_DELIVERY_BREAKER_THRESHOLD = 2;
+// Any tool: this many consecutive failed results, or identical calls in a
+// row, ends the turn instead of billing another full-context request.
+var GROK_SWITCH_LOOP_FAILURE_THRESHOLD = 3;
+var GROK_SWITCH_LOOP_REPEAT_THRESHOLD = 3;
 var GROK_SWITCH_DELIVERY_BREAKER_PREFIX = "grok_switch_delivery_breaker_";
 // Idle timeout: abort when the upstream sends nothing for this long. Long
 // generations keep streaming, so total duration is not capped.
@@ -3834,10 +3838,28 @@ function grokSwitchCurrentTurnStart(messages) {
   return start;
 }
 
+function grokSwitchCallSignature(part) {
+  var name = part.toolName || part.tool_name || part.name || "";
+  var args = "";
+  try {
+    args = JSON.stringify(part.args == null ? {} : part.args);
+  } catch (_error) {
+    args = String(part.args);
+  }
+  return name + " " + args;
+}
+
+// Scans the current turn (everything after the last user message) for signs
+// that the external model is stuck in a tool loop. Every iteration of such a
+// loop is a full-context request billed by the provider, and the host itself
+// imposes no per-turn limit, so this is the only place it can be stopped.
 function grokSwitchDeliveryHistory(messages) {
   var calls = new Map();
   var failed = 0;
   var breakerCompleted = false;
+  var trailingFailures = 0;
+  var trailingTool = null;
+  var signatures = [];
   var start = grokSwitchCurrentTurnStart(messages);
   for (var i = start; i < messages.length; i += 1) {
     var message = messages[i];
@@ -3846,17 +3868,37 @@ function grokSwitchDeliveryHistory(messages) {
       var part = parts[j];
       var type = part == null ? null : part.type;
       var id = grokSwitchPartToolId(part);
-      if (message.role === "assistant" && (type === "tool-call" || type === "tool_call") && id != null && grokSwitchIsDeliveryToolName(part.toolName || part.tool_name || part.name)) {
-        calls.set(id, { breaker: id.indexOf(GROK_SWITCH_DELIVERY_BREAKER_PREFIX) === 0 });
+      if (message.role === "assistant" && (type === "tool-call" || type === "tool_call") && id != null) {
+        var toolName = part.toolName || part.tool_name || part.name;
+        calls.set(id, { name: toolName, delivery: grokSwitchIsDeliveryToolName(toolName), breaker: id.indexOf(GROK_SWITCH_DELIVERY_BREAKER_PREFIX) === 0 });
+        signatures.push(grokSwitchCallSignature(part));
       } else if (message.role === "tool" && (type === "tool-result" || type === "tool_result") && id != null && calls.has(id)) {
         var call = calls.get(id);
         var result = part.result != null ? part.result : part;
-        if (call.breaker && grokSwitchHasSuccessValue(result, 0)) breakerCompleted = true;
-        else if (!call.breaker && grokSwitchHasFailureValue(result, 0)) failed += 1;
+        if (call.breaker) {
+          if (grokSwitchHasSuccessValue(result, 0)) breakerCompleted = true;
+        } else if (grokSwitchHasFailureValue(result, 0)) {
+          if (call.delivery) failed += 1;
+          trailingFailures += 1;
+          trailingTool = call.name;
+        } else {
+          trailingFailures = 0;
+          trailingTool = null;
+        }
       }
     }
   }
-  return { failed: failed, breakerCompleted: breakerCompleted };
+  var repeated = null;
+  var n = signatures.length;
+  if (n >= GROK_SWITCH_LOOP_REPEAT_THRESHOLD) {
+    var last = signatures[n - 1];
+    var same = true;
+    for (var k = n - GROK_SWITCH_LOOP_REPEAT_THRESHOLD; k < n; k += 1) {
+      if (signatures[k] !== last) same = false;
+    }
+    if (same) repeated = last.split(" ")[0];
+  }
+  return { failed: failed, breakerCompleted: breakerCompleted, trailingFailures: trailingFailures, trailingTool: trailingTool, repeated: repeated, rounds: n };
 }
 
 function grokSwitchZeroUsage() {
@@ -3884,13 +3926,14 @@ function grokSwitchImmediateResponseStream(invocationId, modelId, content, event
   };
 }
 
-function grokSwitchDeliveryBreakerStream(invocationId, modelId) {
+function grokSwitchDeliveryBreakerStream(invocationId, modelId, reason) {
   var suffix = crypto.randomUUID().replace(/-/g, "").slice(0, 24);
   var id = GROK_SWITCH_DELIVERY_BREAKER_PREFIX + suffix;
   var args = {
     type: "text",
-    content: "⚠️ 外部供应商连续返回无效的消息工具参数。grok-switch 已停止本轮自动重试，避免继续消耗额度。请重试一条新消息，或发送 `/gs official` 切回官方 Grok。"
+    content: "⚠️ " + reason + " grok-switch 已停止本轮，避免继续消耗额度。请重新发一条消息；如果反复出现，换一个模型或发送 `/gs official` 切回官方 Grok。"
   };
+  grokSwitchAppendLog({ ts: new Date().toISOString(), model: modelId, kind: "breaker", status: 0, ms: 0, error: reason });
   var call = { type: "tool-call", toolCallId: id, toolName: "send_message", args: args };
   return grokSwitchImmediateResponseStream(invocationId, modelId, [call], [
     { type: "tool-call-streaming-start", toolCallId: id, toolName: "send_message" },
@@ -3908,7 +3951,15 @@ function grokSwitchSilentCompletionStream(invocationId, modelId) {
 function grokSwitchDeliveryIntervention(messages, invocationId, modelId) {
   var history = grokSwitchDeliveryHistory(messages);
   if (history.breakerCompleted) return grokSwitchSilentCompletionStream(invocationId, modelId);
-  if (history.failed >= GROK_SWITCH_DELIVERY_BREAKER_THRESHOLD) return grokSwitchDeliveryBreakerStream(invocationId, modelId);
+  if (history.failed >= GROK_SWITCH_DELIVERY_BREAKER_THRESHOLD) {
+    return grokSwitchDeliveryBreakerStream(invocationId, modelId, "外部模型连续 " + history.failed + " 次用无效参数调用消息工具。");
+  }
+  if (history.trailingFailures >= GROK_SWITCH_LOOP_FAILURE_THRESHOLD) {
+    return grokSwitchDeliveryBreakerStream(invocationId, modelId, "外部模型连续 " + history.trailingFailures + " 次调用工具 " + (history.trailingTool || "?") + " 都失败。");
+  }
+  if (history.repeated != null) {
+    return grokSwitchDeliveryBreakerStream(invocationId, modelId, "外部模型连续 " + GROK_SWITCH_LOOP_REPEAT_THRESHOLD + " 次用完全相同的参数调用工具 " + history.repeated + "，判断为死循环。");
+  }
   return null;
 }
 
@@ -4801,7 +4852,7 @@ var cliFs = require("node:fs");
 var cliPath = require("node:path");
 var cliChildProcess = require("node:child_process");
 
-var CLI_VERSION = "0.6.6";
+var CLI_VERSION = "0.6.7";
 var CLI_HOST_PATH = process.env.GROK_SWITCH_HOST || "/home/box/sand-host/host-main.cjs";
 var CLI_HOST_VERSION_PATH = cliPath.join(cliPath.dirname(CLI_HOST_PATH), "version");
 var CLI_BACKUP_PATH = CLI_HOST_PATH + ".grok-switch.orig";

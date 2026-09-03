@@ -340,7 +340,7 @@ test("repeated failed SendMessage calls trip one visible breaker without another
   const call = first.events.find((event) => event.type === "tool-call");
   assert.equal(call.toolName, "send_message");
   assert.equal(call.args.type, "text");
-  assert.match(call.args.content, /停止本轮自动重试/);
+  assert.match(call.args.content, /连续 2 次用无效参数调用消息工具.*已停止本轮/);
   assert.match(call.toolCallId, /^grok_switch_delivery_breaker_/);
   assert.equal(first.events.at(-1).finishReason, "tool-calls");
 
@@ -362,6 +362,42 @@ test("repeated failed SendMessage calls trip one visible breaker without another
   assert.equal(host.fetches.length, 0);
   assert.deepEqual(plain(second.response.value.messages[0].content), []);
   assert.equal(second.events.at(-1).finishReason, "stop");
+});
+
+test("any tool failing three times in a row, or three identical calls, trips the breaker; healthy tool loops continue", async () => {
+  const provider = { ...OPENAI, model: "gpt-5.6-sol" };
+  const text = fs.readFileSync(path.join(FIXTURES, "openai-chat", "text.sse"), "utf8");
+  const round = (id, args, result) => [
+    { role: "assistant", content: [{ type: "tool-call", toolCallId: id, toolName: "shell", args }] },
+    { role: "tool", content: [{ type: "tool-result", toolCallId: id, toolName: "shell", result, ...(result && result.isError ? { isError: true } : {}) }] }
+  ];
+  const run = async (messages) => {
+    const files = new Map([[CONFIG_PATH, config("main", { main: provider })]]);
+    const host = loadHost({ files, fetchImpl: () => sse(text) });
+    const out = await drain(host.inference.createSession(null, { requestSource: "turn" }).getExecutor(messages).stream({}, "inv", [], {}));
+    return { out, host, log: (files.get(LOG_PATH) || "").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) };
+  };
+
+  // Three consecutive failures of an ordinary tool (the production pattern).
+  let r = await run([{ role: "user", content: "go" }, ...round("a", { cmd: "ls /x" }, { isError: true, error: "no such dir" }), ...round("b", { cmd: "ls /y" }, { isError: true, error: "no such dir" }), ...round("c", { cmd: "ls /z" }, { isError: true, error: "no such dir" })]);
+  assert.equal(r.host.fetches.length, 0, "no provider request once the loop is detected");
+  assert.match(r.out.events.find((e) => e.type === "tool-call").args.content, /连续 3 次调用工具 shell 都失败/);
+  assert.equal(r.log.at(-1).kind, "breaker");
+
+  // Two failures then a success resets the count: the turn proceeds normally.
+  r = await run([{ role: "user", content: "go" }, ...round("a", { cmd: "ls" }, { isError: true, error: "x" }), ...round("b", { cmd: "ls" }, { isError: true, error: "x" }), ...round("c", { cmd: "ls -a" }, "file.txt")]);
+  assert.equal(r.host.fetches.length, 1);
+
+  // Identical call repeated three times, results not flagged as errors.
+  r = await run([{ role: "user", content: "go" }, ...round("a", { cmd: "date" }, "ok"), ...round("b", { cmd: "date" }, "ok"), ...round("c", { cmd: "date" }, "ok")]);
+  assert.equal(r.host.fetches.length, 0);
+  assert.match(r.out.events.find((e) => e.type === "tool-call").args.content, /完全相同的参数调用工具 shell/);
+
+  // A legitimate long task: many distinct successful tool calls keep going.
+  const long = [{ role: "user", content: "go" }];
+  for (let i = 0; i < 30; i += 1) long.push(...round("t" + i, { cmd: "step " + i }, "done " + i));
+  r = await run(long);
+  assert.equal(r.host.fetches.length, 1);
 });
 
 test("anthropic providers get x-api-key, anthropic-version and a default max_tokens", async () => {
