@@ -21,6 +21,7 @@ export function ProviderCard({
   onUse,
   onEdit,
   onTest,
+  onDuplicate,
   onDelete,
 }: {
   name: string;
@@ -31,6 +32,7 @@ export function ProviderCard({
   onUse: () => void;
   onEdit?: () => void;
   onTest?: () => void;
+  onDuplicate?: () => void;
   onDelete?: () => void;
 }) {
   const official = provider == null;
@@ -66,7 +68,7 @@ export function ProviderCard({
             )}
           </div>
         </div>
-        <ProviderActions active={active} official={official} busy={busy} switching={switching} onUse={onUse} onEdit={onEdit} onTest={onTest} onDelete={onDelete} />
+        <ProviderActions active={active} official={official} busy={busy} switching={switching} onUse={onUse} onEdit={onEdit} onTest={onTest} onDuplicate={onDuplicate} onDelete={onDelete} />
       </div>
     </article>
   );

@@ -1,5 +1,5 @@
 // Adapted from CC Switch ProviderActions.tsx (MIT, Jason Young).
-import { Activity, Check, Edit, Play, Trash2 } from "lucide-react";
+import { Activity, Check, Copy, Edit, Play, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 export function ProviderActions({
@@ -10,6 +10,7 @@ export function ProviderActions({
   onUse,
   onEdit,
   onTest,
+  onDuplicate,
   onDelete,
 }: {
   active: boolean;
@@ -19,6 +20,7 @@ export function ProviderActions({
   onUse: () => void;
   onEdit?: () => void;
   onTest?: () => void;
+  onDuplicate?: () => void;
   onDelete?: () => void;
 }) {
   const iconButtonClass = "h-8 w-8 p-1";
@@ -41,6 +43,9 @@ export function ProviderActions({
           </Button>
           <Button size="icon" variant="ghost" disabled={busy} onClick={onTest} aria-label="测试" title="发一条测试请求" className={iconButtonClass}>
             <Activity className="h-4 w-4" />
+          </Button>
+          <Button size="icon" variant="ghost" disabled={busy} onClick={onDuplicate} aria-label="复制" title="复制为新来源（保留 key，改模型即可）" className={iconButtonClass}>
+            <Copy className="h-4 w-4" />
           </Button>
           <Button
             size="icon"

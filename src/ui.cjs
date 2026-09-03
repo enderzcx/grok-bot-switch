@@ -132,8 +132,74 @@ function uiFlagsFromBody(body) {
   return flags;
 }
 
+// Lists models the provider exposes (GET <baseUrl>/models, the OpenAI and
+// Anthropic convention) so the form can offer them instead of requiring the
+// exact id to be typed. Works from the form's current values; when editing a
+// saved provider with the key left blank, the stored key is used.
+async function uiFetchModels(body) {
+  var config = cliReadRawConfig();
+  var existing = body.name && config.providers[body.name] ? config.providers[body.name] : null;
+  var raw = {
+    protocol: body.protocol || (existing && existing.protocol) || "openai-chat",
+    baseUrl: body.baseUrl || (existing && existing.baseUrl),
+    model: "placeholder",
+    apiKey: body.apiKey || (existing && existing.apiKey) || "",
+    authType: body.authType || (existing && existing.authType) || void 0,
+    headers: existing && existing.headers ? existing.headers : void 0
+  };
+  if (Array.isArray(body.headers) && body.headers.length > 0) {
+    raw.headers = {};
+    for (var i = 0; i < body.headers.length; i += 1) {
+      var line = String(body.headers[i]);
+      var colon = line.indexOf(":");
+      if (colon > 0) raw.headers[line.slice(0, colon).trim()] = line.slice(colon + 1).trim();
+    }
+  }
+  var provider;
+  try {
+    provider = grokSwitchNormalizeProvider(body.name || "draft", raw);
+  } catch (error) {
+    throw new CliError(error.message);
+  }
+  if (provider.authType === "codex") return { models: [], note: "ChatGPT 登录方式不提供模型列表，请直接填写模型名" };
+  var codex = null;
+  var headers = grokSwitchBuildHeaders(provider, { accept: "application/json" }, codex);
+  if (provider.protocol === "anthropic-messages") headers["anthropic-version"] = (provider.parameters && provider.parameters.anthropicVersion) || "2023-06-01";
+  var url = provider.baseUrl + "/models" + provider.baseQuery;
+  var controller = new AbortController();
+  var timer = setTimeout(function () {
+    controller.abort();
+  }, 15000);
+  var response;
+  try {
+    response = await fetch(url, { method: "GET", headers: headers, redirect: "error", signal: controller.signal });
+  } catch (error) {
+    throw new CliError("无法连接 " + url + (error && error.cause && error.cause.message ? "（" + error.cause.message + "）" : ""));
+  } finally {
+    clearTimeout(timer);
+  }
+  var text = await response.text();
+  if (!response.ok) throw new CliError("GET " + url + " 返回 HTTP " + response.status + (text ? "：" + text.slice(0, 300) : ""));
+  var parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (_error) {
+    throw new CliError(url + " 返回的不是 JSON");
+  }
+  var list = Array.isArray(parsed) ? parsed : Array.isArray(parsed.data) ? parsed.data : Array.isArray(parsed.models) ? parsed.models : [];
+  var ids = [];
+  for (var j = 0; j < list.length; j += 1) {
+    var item = list[j];
+    var id = typeof item === "string" ? item : item && (item.id || item.name || item.model);
+    if (typeof id === "string" && id.length > 0 && ids.indexOf(id) === -1) ids.push(id);
+  }
+  ids.sort();
+  return { models: ids, url: url };
+}
+
 async function uiHandleApi(method, pathname, body) {
   if (method === "GET" && pathname === "/api/state") return uiState();
+  if (method === "POST" && pathname === "/api/models") return uiFetchModels(body);
   if (method === "POST" && pathname === "/api/providers") {
     var name = cliRequireProviderName(body.name);
     var config = cliReadRawConfig();
@@ -143,6 +209,16 @@ async function uiHandleApi(method, pathname, body) {
     cliWriteConfig(config);
     var probe = body.test === false ? null : await cliProbeProvider(grokSwitchNormalizeProvider(name, config.providers[name]));
     return { saved: name, probe: probe, state: uiState() };
+  }
+  if (method === "POST" && pathname === "/api/providers/duplicate") {
+    var source = cliRequireProviderName(body.name);
+    var target = cliRequireProviderName(body.newName);
+    var dupConfig = cliReadRawConfig();
+    if (dupConfig.providers[source] == null) throw new CliError("no provider named " + source);
+    if (dupConfig.providers[target] != null) throw new CliError("已有名为 " + target + " 的来源");
+    dupConfig.providers[target] = JSON.parse(JSON.stringify(dupConfig.providers[source]));
+    cliWriteConfig(dupConfig);
+    return { saved: target, state: uiState() };
   }
   if (method === "POST" && pathname === "/api/providers/delete") {
     var lines = await cliCapture(function () {

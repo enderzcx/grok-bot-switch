@@ -126,8 +126,19 @@ async function call<T>(path: string, body?: unknown): Promise<T> {
   return json as T;
 }
 
+export interface ModelsQuery {
+  name?: string;
+  protocol: Protocol;
+  baseUrl: string;
+  apiKey?: string;
+  authType?: string;
+  headers?: string[];
+}
+
 export const api = {
   state: () => call<State>("/api/state"),
+  models: (query: ModelsQuery) => call<{ models: string[]; note?: string; url?: string }>("/api/models", query),
+  duplicateProvider: (name: string, newName: string) => call<{ saved: string; state: State }>("/api/providers/duplicate", { name, newName }),
   saveProvider: (input: ProviderInput) => call<{ saved: string; probe: Probe | null; state: State }>("/api/providers", input),
   deleteProvider: (name: string) => call<{ lines: string[]; state: State }>("/api/providers/delete", { name }),
   test: (name: string) => call<{ probe: Probe }>("/api/test", { name }),

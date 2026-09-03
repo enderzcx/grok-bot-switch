@@ -84,6 +84,11 @@ function nodeCheck(file) {
 function startFakeOpenAi(onRequest) {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
+      if (req.method === "GET" && req.url.endsWith("/models")) {
+        res.writeHead(req.headers.authorization === "Bearer k1" ? 200 : 401, { "content-type": "application/json" });
+        res.end(JSON.stringify(req.headers.authorization === "Bearer k1" ? { object: "list", data: [{ id: "m1" }, { id: "gpt-5" }, { id: "gpt-5-mini" }] } : { error: { message: "bad key" } }));
+        return;
+      }
       let body = "";
       req.on("data", (chunk) => (body += chunk));
       req.on("end", () => {
@@ -369,6 +374,23 @@ test("ui panel: same-origin loopback API drives save, probe, use, official and s
     assert.equal(used.json.state.active, "local");
     assert.equal(used.json.state.host.patched, true);
     assert.ok(fs.readFileSync(host, "utf8").includes("GROK_SWITCH_BEGIN"));
+
+    // Model list fetched from <baseUrl>/models with the form's credentials, or the stored key when editing.
+    const models = await api(base, tok, "/api/models", { protocol: "openai-chat", baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "k1" });
+    assert.equal(models.status, 200, JSON.stringify(models.json));
+    assert.deepEqual(models.json.models, ["gpt-5", "gpt-5-mini", "m1"]);
+    const storedKey = await api(base, tok, "/api/models", { name: "local", protocol: "openai-chat", baseUrl: `http://127.0.0.1:${port}/v1` });
+    assert.deepEqual(storedKey.json.models, ["gpt-5", "gpt-5-mini", "m1"]);
+    const badKey = await api(base, tok, "/api/models", { protocol: "openai-chat", baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "nope" });
+    assert.equal(badKey.status, 400);
+    assert.match(badKey.json.error, /HTTP 401/);
+
+    // Duplicate keeps the key so the copy only needs a new model.
+    const dup = await api(base, tok, "/api/providers/duplicate", { name: "local", newName: "local-copy" });
+    assert.equal(dup.status, 200, JSON.stringify(dup.json));
+    assert.equal(dup.json.state.providers["local-copy"].hasKey, true);
+    assert.equal(dup.json.state.providers["local-copy"].model, "m1");
+    assert.equal((await api(base, tok, "/api/providers/duplicate", { name: "local", newName: "local-copy" })).status, 400);
 
     const official = await api(base, tok, "/api/official", {});
     assert.equal(official.json.state.active, null);

@@ -9,6 +9,7 @@ import { ImeSafeInput } from "@/components/ui/ime-safe-input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import ApiKeyInput from "./forms/ApiKeyInput";
 import { RequestHeadersEditor } from "./forms/RequestHeadersEditor";
+import { ModelPicker } from "./forms/ModelPicker";
 import { normalizeRequestHeaders } from "./forms/helpers/requestHeaders";
 import { cn } from "@/lib/utils";
 import { api, endpointPreview, PROTOCOL_LABELS, type Probe, type Protocol, type Provider, type ProviderInput, type State } from "@/lib/api";
@@ -197,10 +198,12 @@ export function ProviderForm({
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-2">
-            <Label htmlFor="model">模型</Label>
-            <ImeSafeInput id="model" value={model} onValueChange={setModel} placeholder="gpt-5" autoComplete="off" spellCheck={false} />
-          </div>
+          <ModelPicker
+            value={model}
+            onChange={setModel}
+            query={{ name: editing ?? undefined, protocol, baseUrl: baseUrl.trim(), apiKey, authType: codex ? "codex" : authType === "default" ? "" : authType, headers: Object.entries(normalizeRequestHeaders(headers)).map(([k, v]) => `${k}: ${v}`) }}
+            canFetch={Boolean(baseUrl.trim()) && (Boolean(apiKey) || authType === "none" || Boolean(editing) || codex)}
+          />
           {codex ? (
             <div className="space-y-2">
               <Label>认证</Label>

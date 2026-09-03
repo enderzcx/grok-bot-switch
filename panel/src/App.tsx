@@ -119,6 +119,14 @@ export default function App() {
     }
   }
 
+  async function duplicateProvider(name: string) {
+    let candidate = name + "-copy";
+    let n = 2;
+    while (state && state.providers[candidate]) candidate = `${name}-copy${n++}`;
+    await run("dup:" + name, () => api.duplicateProvider(name, candidate), `已复制为 ${candidate}，点它的编辑改模型即可`);
+    setForm({ editing: candidate });
+  }
+
   function onSaved(next: State, name: string, probe: Probe | null, useNow: boolean) {
     setState(next);
     if (probe && !probe.ok) return;
@@ -220,6 +228,7 @@ export default function App() {
               onUse={() => void run("use:" + name, () => api.use(name))}
               onEdit={() => setForm({ editing: name })}
               onTest={() => void testProvider(name)}
+              onDuplicate={() => void duplicateProvider(name)}
               onDelete={() => setReview({ kind: "delete", name })}
             />
           ))}
