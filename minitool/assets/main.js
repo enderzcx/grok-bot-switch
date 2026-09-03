@@ -43,7 +43,7 @@
   }
 
   function downloadCommand() {
-    return "mkdir -p /workspace/grok-switch && curl -fsSL " + DOWNLOAD_URL + " -o " + TOOL_PATH;
+    return "mkdir -p /workspace/grok-switch && curl -fsSL \"" + DOWNLOAD_URL + "?v=$(date +%s)\" -o " + TOOL_PATH;
   }
 
   function fieldValue(id) {

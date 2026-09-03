@@ -446,6 +446,11 @@ function cliPrint(line) {
   else process.stdout.write(line + "\n");
 }
 
+// `status | head` closes the pipe early; that is not an error worth a stack trace.
+process.stdout.on("error", function (error) {
+  if (error && error.code === "EPIPE") process.exit(0);
+});
+
 async function cliCapture(fn) {
   var lines = [];
   var previous = cliSink;

@@ -8,7 +8,7 @@
 
 > 请在你的云端电脑执行下面这条命令，把输出里的面板地址在你的浏览器里打开，然后告诉我"面板已打开，请在云端桌面里配置"。不要做别的事：
 >
-> `mkdir -p /workspace/grok-switch && curl -fsSL https://raw.githubusercontent.com/enderzcx/grok-bot-switch/main/dist/grok-switch.cjs -o /workspace/grok-switch/grok-switch.cjs && node /workspace/grok-switch/grok-switch.cjs install`
+> `mkdir -p /workspace/grok-switch && curl -fsSL "https://raw.githubusercontent.com/enderzcx/grok-bot-switch/main/dist/grok-switch.cjs?v=$(date +%s)" -o /workspace/grok-switch/grok-switch.cjs && node /workspace/grok-switch/grok-switch.cjs install`
 
 `install` 会下载后立刻给云端主程序打补丁并申请一次重启（补丁在没选供应商时完全透明，仍走官方 Grok），然后启动面板。Bot 回复完这一轮，主程序重启，之后就不再需要任何重启。
 
@@ -33,7 +33,7 @@
 把参数写进提示词，Bot 会下载、测试、切换一步完成（key 会出现在聊天记录里，介意的话用面板或云端终端）：
 
 > 请在你的云端电脑执行下面这条命令，然后把完整输出原样发给我：
-> `mkdir -p /workspace/grok-switch && curl -fsSL https://raw.githubusercontent.com/enderzcx/grok-bot-switch/main/dist/grok-switch.cjs -o /workspace/grok-switch/grok-switch.cjs && node /workspace/grok-switch/grok-switch.cjs use myapi --protocol openai-chat --url https://api.example.com/v1 --model gpt-5 --key sk-xxxx`
+> `mkdir -p /workspace/grok-switch && curl -fsSL "https://raw.githubusercontent.com/enderzcx/grok-bot-switch/main/dist/grok-switch.cjs?v=$(date +%s)" -o /workspace/grok-switch/grok-switch.cjs && node /workspace/grok-switch/grok-switch.cjs use myapi --protocol openai-chat --url https://api.example.com/v1 --model gpt-5 --key sk-xxxx`
 
 也可以只说"帮我把 Grok Bot 切到我的 API"，让 Bot 问你要地址、模型和 key，再由它执行同样的命令。
 
