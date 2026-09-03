@@ -133,7 +133,7 @@ export default function App() {
         <div className="space-y-2">
           <p className="text-lg font-semibold">无法连接面板服务</p>
           <p className="text-sm text-muted-foreground">{loadError}</p>
-          <p className="text-xs text-muted-foreground">请用 `ui` 命令打印出的完整地址（带令牌）重新打开。</p>
+          <p className="text-xs text-muted-foreground">面板服务可能已停止；对 Grok Bot 说"打开 grok-switch 面板"重新启动。</p>
         </div>
       </div>
     );

@@ -50,7 +50,7 @@
 | 命令 | 作用 |
 |---|---|
 | `install [--no-ui]` | 打补丁、申请一次重启、启动面板；重复执行无副作用 |
-| `ui [--background] [--port N]` / `ui status` / `ui stop` | 配置面板，只监听 127.0.0.1，地址带一次性令牌 |
+| `ui [--background] [--port N]` / `ui status` / `ui stop` | 配置面板，`http://127.0.0.1:18990/`，只监听云端本机 |
 | `use <name> [选项]` | 切到某个供应商；带选项时先保存/更新它并先发测试请求（`--no-test` 跳过）。必要时打补丁并申请重启 |
 | `official` | 切回官方 Grok，配置保留 |
 | `add <name> <选项>` / `remove <name>` | 保存或删除供应商，不切换 |
@@ -73,7 +73,7 @@ Grok Bot 的推理请求不是从你的 Mac/Windows 发出的，而是从它的�
 
 因为路由是每次会话时决定的，切换只是改配置文件，**不需要重启**。为什么装的时候要重启一次：主程序是一个已经在跑的 Node 进程，代码在启动时已读进内存，改磁盘文件不会影响它，只有重启才会带着补丁起来。这一次重启在 `install` 时就申请了，由 Grok 自带的 supervisor 在没有 Bot 忙碌时执行（Grok 给自己升级用的同一机制）；之后除 Grok Bot 升级覆盖主程序需要重新打补丁外，不再重启。补丁只依赖主程序里 `createHostInference` 这一个函数名，不校验版本哈希；写入前 `node --check`，原文件备份为 `host-main.cjs.grok-switch.orig`，`restore` 后逐字节一致。
 
-面板是 `dist/grok-switch.cjs` 里内嵌的一页 HTML（移植自 CC Switch 的 React 界面，构建后内联成单文件），由同一个文件起的 HTTP 服务提供，只监听 127.0.0.1，API 要求地址里的一次性令牌；它调用的就是上面的终端命令，不多一套逻辑。
+面板是 `dist/grok-switch.cjs` 里内嵌的一页 HTML（移植自 CC Switch 的 React 界面，构建后内联成单文件），由同一个文件起的 HTTP 服务提供，只监听 127.0.0.1，接口只接受来自面板页面本身的同源请求（校验 Host、Origin 和自定义请求头）；它调用的就是上面的终端命令，不多一套逻辑。
 
 ## 边界与注意
 

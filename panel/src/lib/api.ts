@@ -1,5 +1,5 @@
 // Same-origin adapter to the grok-switch panel API served by dist/grok-switch.cjs.
-// The per-run token comes from the URL the CLI printed (?t=...).
+// Requests carry a custom header; the server only accepts same-origin loopback callers.
 
 export type Protocol = "openai-chat" | "openai-responses" | "anthropic-messages";
 export type AuthType = "bearer" | "x-api-key" | "none" | "codex";
@@ -115,12 +115,10 @@ export function endpointPreview(protocol: Protocol, baseUrl: string, endpointPat
   return base + (endpointPath && endpointPath.trim() ? endpointPath.trim() : DEFAULT_PATHS[protocol]);
 }
 
-const token = new URLSearchParams(window.location.search).get("t") ?? "";
-
 async function call<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, {
     method: body === undefined ? "GET" : "POST",
-    headers: { "x-gs-token": token, "content-type": "application/json" },
+    headers: { "x-gs-panel": "1", "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const json = (await response.json().catch(() => ({}))) as { error?: string };

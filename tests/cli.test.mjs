@@ -289,7 +289,7 @@ test("install patches, requests the one-time restart and starts the panel; later
     assert.match(r.out, /host bundle patched/);
     assert.match(r.out, /restart requested/);
     assert.match(r.out, /route: official Grok \(unchanged/);
-    assert.match(r.out, /panel running: http:\/\/127\.0\.0\.1:\d+\/\?t=/);
+    assert.match(r.out, /panel running: http:\/\/127\.0\.0\.1:\d+\/\s/);
     assert.ok(fs.readFileSync(host, "utf8").includes("GROK_SWITCH_BEGIN"));
     assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "sup", "command.json"), "utf8")).reason, "grok-switch install");
     assert.equal(fs.existsSync(path.join(dir, "cfg", "config.json")), false, "install selects no provider");
@@ -314,19 +314,21 @@ test("install patches, requests the one-time restart and starts the panel; later
   }
 });
 
-test("ui panel: token-gated API drives save, probe, use, official and stop", async () => {
+test("ui panel: same-origin loopback API drives save, probe, use, official and stop", async () => {
   const { host, env } = makeEnv();
   const { server, port } = await startFakeOpenAi(() => ({ status: 200 }));
-  const api = async (base, tok, path, body) => {
-    const res = await fetch(base + path, { method: body === undefined ? "GET" : "POST", headers: { "x-gs-token": tok, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const api = async (base, extraHeaders, path, body) => {
+    const headers = { "x-gs-panel": "1", "content-type": "application/json", ...extraHeaders };
+    if (extraHeaders && extraHeaders["x-gs-panel"] === null) delete headers["x-gs-panel"];
+    const res = await fetch(base + path, { method: body === undefined ? "GET" : "POST", headers, body: body === undefined ? undefined : JSON.stringify(body) });
     return { status: res.status, json: await res.json().catch(() => null), text: null };
   };
+  const tok = {};
   try {
     let r = await runAsync(env, "ui", "--background", "--port", "0");
     assert.equal(r.code, 0, r.err);
-    const url = /panel running: (http:\/\/127\.0\.0\.1:\d+\/\?t=[a-f0-9]{32})/.exec(r.out)[1];
-    const base = url.slice(0, url.indexOf("/?"));
-    const tok = url.slice(url.indexOf("t=") + 2);
+    const url = /panel running: (http:\/\/127\.0\.0\.1:\d+\/)\s/.exec(r.out)[1];
+    const base = url.slice(0, -1);
     const state = JSON.parse(fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "ui.json"), "utf8"));
     assert.equal(state.url, url);
     assert.equal(state.version, PKG_VERSION);
@@ -334,7 +336,16 @@ test("ui panel: token-gated API drives save, probe, use, official and stop", asy
     const page = await fetch(base + "/");
     assert.equal(page.status, 200);
     assert.match(await page.text(), /Grok Bot Switch/);
-    assert.equal((await api(base, "wrong", "/api/state")).status, 403);
+    // Access rules: page header required; foreign Origin and non-loopback Host rejected; own origin fine.
+    assert.equal((await api(base, { "x-gs-panel": null }, "/api/state")).status, 403, "missing panel header");
+    assert.equal((await api(base, { origin: "http://evil.example" }, "/api/state")).status, 403, "cross-site origin");
+    // fetch() refuses to override Host, so the rebinding check uses node:http directly.
+    const rebound = await new Promise((resolve, reject) => {
+      const u = new URL(base);
+      http.get({ host: u.hostname, port: u.port, path: "/api/state", headers: { host: "panel.attacker.example:1", "x-gs-panel": "1" } }, (res) => resolve(res.statusCode)).on("error", reject);
+    });
+    assert.equal(rebound, 403, "dns-rebinding host");
+    assert.equal((await api(base, { origin: base }, "/api/state")).status, 200, "same origin");
 
     let s = await api(base, tok, "/api/state");
     assert.equal(s.status, 200);
@@ -383,13 +394,9 @@ test("ui panel: token-gated API drives save, probe, use, official and stop", asy
     r = await runAsync(env, "ui", "status");
     assert.match(r.out, /not running/);
 
-    // The token is per installation: a restarted panel keeps the same URL token.
+    // Restarting yields the same plain URL shape (no per-run secret in it).
     r = await runAsync(env, "ui", "--background", "--port", "0");
-    const again = /\?t=([a-f0-9]{32})/.exec(r.out)[1];
-    assert.equal(again, tok, "token survives restarts");
-    await runAsync(env, "ui", "stop");
-    r = await runAsync(env, "ui", "--background", "--port", "0", "--new-token");
-    assert.notEqual(/\?t=([a-f0-9]{32})/.exec(r.out)[1], tok, "--new-token rotates it");
+    assert.match(r.out, /panel running: http:\/\/127\.0\.0\.1:\d+\/\s/);
     await runAsync(env, "ui", "stop");
   } finally {
     server.close();

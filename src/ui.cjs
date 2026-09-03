@@ -3,12 +3,10 @@
 // Appended by build.mjs before cli.cjs; cli* helpers are in scope.
 
 var uiHttp = require("node:http");
-var uiCrypto = require("node:crypto");
 var uiChild = require("node:child_process");
 
 var UI_DEFAULT_PORT = 18990;
 var UI_STATE_PATH = GROK_SWITCH_DIR + "/ui.json";
-var UI_TOKEN_PATH = GROK_SWITCH_DIR + "/panel-token";
 var UI_LOG_PATH = GROK_SWITCH_DIR + "/ui.log";
 var UI_JOB_MAX_OUTPUT = 20000;
 
@@ -233,7 +231,28 @@ function uiReadBody(request) {
   });
 }
 
-function uiCreateServer(token) {
+// The API is reachable only from the panel page itself. The server binds to
+// 127.0.0.1; on top of that every API request must (a) carry a loopback Host
+// header (defeats DNS rebinding), (b) carry no Origin or one equal to the
+// panel's own origin (a page on another site cannot forge that), and (c) carry
+// a custom header, which cross-site requests cannot add without a CORS
+// preflight this server never approves. Processes on the same machine and
+// user can read the config file anyway, so a secret token would add nothing.
+function uiRequestAllowed(request) {
+  var hostHeader = String(request.headers.host || "");
+  var hostname;
+  try {
+    hostname = new URL("http://" + hostHeader).hostname;
+  } catch (_error) {
+    return false;
+  }
+  if (hostname !== "127.0.0.1" && hostname !== "localhost" && hostname !== "[::1]") return false;
+  var origin = request.headers.origin;
+  if (origin != null && origin !== "http://" + hostHeader) return false;
+  return request.headers["x-gs-panel"] != null;
+}
+
+function uiCreateServer() {
   return uiHttp.createServer(function (request, response) {
     var url = new URL(request.url, "http://127.0.0.1");
     var send = function (status, payload, type) {
@@ -243,7 +262,7 @@ function uiCreateServer(token) {
     };
     if (url.pathname === "/" && request.method === "GET") return send(200, UI_HTML, "text/html; charset=utf-8");
     if (url.pathname.indexOf("/api/") !== 0) return send(404, { error: "not found" });
-    if (request.headers["x-gs-token"] !== token) return send(403, { error: "bad token; reopen the panel from the URL printed by `ui`" });
+    if (!uiRequestAllowed(request)) return send(403, { error: "requests must come from the panel page on this machine" });
     var run = function () {
       return uiReadBody(request).then(function (body) {
         return uiHandleApi(request.method, url.pathname, body);
@@ -268,31 +287,13 @@ function uiReadState() {
   }
 }
 
-// The token is created once per installation and kept in the config dir, so
-// the panel URL a user has open (or bookmarked in the cloud browser) survives
-// panel restarts and upgrades. `ui --new-token` rotates it.
-function uiToken(rotate) {
-  var path = UI_TOKEN_PATH;
-  if (!rotate) {
-    try {
-      var existing = cliFs.readFileSync(path, "utf8").trim();
-      if (/^[a-f0-9]{32}$/.test(existing)) return existing;
-    } catch (_error) {}
-  }
-  var token = uiCrypto.randomBytes(16).toString("hex");
-  cliFs.mkdirSync(CLI_CONFIG_DIR, { recursive: true, mode: 448 });
-  cliFs.writeFileSync(path, token + "\n", { mode: 384 });
-  return token;
-}
-
-function uiServe(port, rotateToken) {
-  var token = uiToken(rotateToken === true);
-  var server = uiCreateServer(token);
+function uiServe(port) {
+  var server = uiCreateServer();
   return new Promise(function (resolve, reject) {
     server.on("error", reject);
     server.listen(port, "127.0.0.1", function () {
       var actualPort = server.address().port;
-      var panelUrl = "http://127.0.0.1:" + actualPort + "/?t=" + token;
+      var panelUrl = "http://127.0.0.1:" + actualPort + "/";
       cliFs.mkdirSync(CLI_CONFIG_DIR, { recursive: true, mode: 448 });
       cliFs.writeFileSync(UI_STATE_PATH, JSON.stringify({ pid: process.pid, port: actualPort, url: panelUrl, version: CLI_VERSION, startedAt: new Date().toISOString() }), { mode: 384 });
       resolve({ server: server, url: panelUrl });
@@ -342,7 +343,7 @@ async function uiCommand(args) {
   if (args.flags.background) {
     cliFs.mkdirSync(CLI_CONFIG_DIR, { recursive: true, mode: 448 });
     var log = cliFs.openSync(UI_LOG_PATH, "a", 384);
-    var child = uiChild.spawn(process.execPath, [__filename, "ui", "--port", String(port)].concat(args.flags["new-token"] ? ["--new-token"] : []), { detached: true, stdio: ["ignore", log, log], env: process.env });
+    var child = uiChild.spawn(process.execPath, [__filename, "ui", "--port", String(port)], { detached: true, stdio: ["ignore", log, log], env: process.env });
     child.unref();
     for (var i = 0; i < 50; i += 1) {
       await new Promise(function (resolve) {
@@ -357,7 +358,7 @@ async function uiCommand(args) {
     }
     throw new CliError("panel did not start; see " + UI_LOG_PATH);
   }
-  var served = await uiServe(port, args.flags["new-token"] === true);
+  var served = await uiServe(port);
   cliPrint("panel running: " + served.url);
   cliPrint("open this URL in the browser on the cloud machine (not on your own computer). Ctrl+C stops it.");
   var stop = function () {
