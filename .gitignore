@@ -2,3 +2,4 @@ node_modules/
 runtime/
 *.tmp
 .claude/
+panel/node_modules/

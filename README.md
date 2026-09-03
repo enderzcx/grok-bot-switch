@@ -73,10 +73,12 @@ Grok Bot 的推理请求不是从你的 Mac/Windows 发出的，而是从它的�
 
 因为路由是每次会话时决定的，切换只是改配置文件，**不需要重启**。为什么装的时候要重启一次：主程序是一个已经在跑的 Node 进程，代码在启动时已读进内存，改磁盘文件不会影响它，只有重启才会带着补丁起来。这一次重启在 `install` 时就申请了，由 Grok 自带的 supervisor 在没有 Bot 忙碌时执行（Grok 给自己升级用的同一机制）；之后除 Grok Bot 升级覆盖主程序需要重新打补丁外，不再重启。补丁只依赖主程序里 `createHostInference` 这一个函数名，不校验版本哈希；写入前 `node --check`，原文件备份为 `host-main.cjs.grok-switch.orig`，`restore` 后逐字节一致。
 
-面板是 `dist/grok-switch.cjs` 里内嵌的一页 HTML，由同一个文件起的 HTTP 服务提供，只监听 127.0.0.1，API 要求地址里的一次性令牌；它调用的就是上面的终端命令，不多一套逻辑。
+面板是 `dist/grok-switch.cjs` 里内嵌的一页 HTML（移植自 CC Switch 的 React 界面，构建后内联成单文件），由同一个文件起的 HTTP 服务提供，只监听 127.0.0.1，API 要求地址里的一次性令牌；它调用的就是上面的终端命令，不多一套逻辑。
 
 ## 边界与注意
 
+- 给用外部模型的 Bot 建议关掉"本机执行"：外部模型往往不会指定目标机器，主程序会把命令默认路由到你自己的电脑上。
+- ChatGPT 登录目前是实验性功能，云端实测还少；不工作请反馈。
 - 切换影响同一云端上的所有 Bot；语音转写、标题生成等非推理功能在外部模式下不走供应商（标题/标注回调被跳过，语音仍走官方）。
 - 配置文件包含 API key，权限 600，只对当前云端用户可读；面板和请求日志都不回显 key。
 - 选中供应商后如果请求失败（key 错、余额不足、供应商挂了），对话直接报错并写入 `log`，**不会**悄悄回落到官方计费。
@@ -88,6 +90,8 @@ Grok Bot 的推理请求不是从你的 Mac/Windows 发出的，而是从它的�
 ```sh
 npm test        # 构建 dist/grok-switch.cjs 并运行全部测试（无第三方依赖，Node 20+）
 ```
+
+`panel/` 是配置面板的 React 源码，移植自 [CC Switch](https://github.com/farion1231/cc-switch)（MIT）的供应商管理界面，Vite 构建成单个 `panel/dist/index.html` 后由 `build.mjs` 嵌进 `dist/grok-switch.cjs`（`cd panel && npm install && npm run build`）。
 
 `minitool/` 是挂在小红书"小工具"里的离线使用向导（纯静态 H5：安装提示词生成器、切换命令、ChatGPT 登录说明、常见问题），`npm run build:minitool` 打成 `dist/grok-switch-minitool.zip` 直接上传；它不联网、不调用剪贴板，按小红书小工具容器规范编写（脚本外置、ES2017、Chrome 61 CSS 基线）。
 

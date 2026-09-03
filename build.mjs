@@ -57,8 +57,13 @@ payload += `function createHostInference(options) {
 // GROK_SWITCH_PAYLOAD_END
 `;
 
+// The panel is a React app built by Vite into one self-contained HTML file
+// (panel/dist/index.html, committed). It is embedded as a string constant.
+const panelHtml = readFileSync(join(root, "panel", "dist", "index.html"), "utf8");
+const panel = "var UI_HTML = " + JSON.stringify(panelHtml) + ";\n";
+
 // ui.cjs precedes cli.cjs so its top-level vars exist before cliMain runs.
-const cli = read("src/ui.cjs") + read("src/cli.cjs").replace("__GROK_SWITCH_VERSION__", version);
+const cli = read("src/ui.cjs") + panel + read("src/cli.cjs").replace("__GROK_SWITCH_VERSION__", version);
 
 const output = `#!/usr/bin/env node
 // grok-switch ${version} - https://github.com/enderzcx/grok-bot-switch
