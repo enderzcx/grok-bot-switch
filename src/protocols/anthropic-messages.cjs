@@ -113,7 +113,7 @@ function assistantContent(message) {
       type: "tool_use",
       id: payload.toolCalls[t].id,
       name: payload.toolCalls[t].name,
-      input: tools.parseToolArgumentsObject(payload.toolCalls[t].arguments, PROTOCOL_ID)
+      input: tools.parseToolArgumentsObject(payload.toolCalls[t].arguments, PROTOCOL_ID, payload.toolCalls[t].name)
     });
   }
   return content;
@@ -316,7 +316,7 @@ function createAnthropicState(requestId) {
       type: "tool-call",
       toolCallId: current.id,
       toolName: current.name,
-      args: tools.parseToolArgumentsObject(current.arguments, PROTOCOL_ID)
+      args: tools.parseToolArgumentsObject(current.arguments, PROTOCOL_ID, current.name)
     });
     current.finalized = true;
   }

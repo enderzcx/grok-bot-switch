@@ -275,7 +275,7 @@ function createToolCallAccumulator() {
           type: "tool-call",
           toolCallId: current.id,
           toolName: current.name,
-          args: tools.parseToolArgumentsObject(current.arguments, PROTOCOL_ID)
+          args: tools.parseToolArgumentsObject(current.arguments, PROTOCOL_ID, current.name)
         });
       }
       callsFinalized = true;

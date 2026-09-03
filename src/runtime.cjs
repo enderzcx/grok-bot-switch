@@ -25,6 +25,8 @@ var GROK_SWITCH_DEFAULT_ANTHROPIC_MAX_TOKENS = 8192;
 var GROK_SWITCH_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 var GROK_SWITCH_MAX_SSE_EVENT_BYTES = 4 * 1024 * 1024;
 var GROK_SWITCH_MAX_FAILURE_BODY_BYTES = 64 * 1024;
+var GROK_SWITCH_DELIVERY_BREAKER_THRESHOLD = 2;
+var GROK_SWITCH_DELIVERY_BREAKER_PREFIX = "grok_switch_delivery_breaker_";
 // Idle timeout: abort when the upstream sends nothing for this long. Long
 // generations keep streaming, so total duration is not capped.
 var GROK_SWITCH_IDLE_TIMEOUT_MS = 180000;
@@ -411,7 +413,8 @@ function grokSwitchInterceptCommands(executor) {
 }
 
 function grokSwitchIsMainSession(sessionOptions) {
-  return grokSwitchRequestKind(sessionOptions) === "main";
+  var kind = grokSwitchRequestKind(sessionOptions);
+  return kind === "main" || kind === "turn";
 }
 
 // ---------------------------------------------------------------------------
@@ -720,6 +723,130 @@ function grokSwitchHydrateMessages(messages) {
     }
   }
   return out;
+}
+
+function grokSwitchMessageParts(message) {
+  return message != null && Array.isArray(message.content) ? message.content : [];
+}
+
+function grokSwitchIsDeliveryToolName(name) {
+  return typeof name === "string" && /^(?:send_?message|send_?to_?user)$/i.test(name);
+}
+
+function grokSwitchPartToolId(part) {
+  if (part == null || typeof part !== "object") return null;
+  if (typeof part.toolCallId === "string") return part.toolCallId;
+  if (typeof part.tool_call_id === "string") return part.tool_call_id;
+  return typeof part.id === "string" ? part.id : null;
+}
+
+function grokSwitchHasFailureValue(value, depth) {
+  if (value == null || depth > 8) return false;
+  if (typeof value === "string") return /invalid arguments|nothing was sent|not delivered/i.test(value);
+  if (typeof value !== "object") return false;
+  if (value.isError === true) return true;
+  if (Object.prototype.hasOwnProperty.call(value, "error") && value.error != null && value.error !== "") return true;
+  var names = Object.keys(value);
+  for (var i = 0; i < names.length; i += 1) {
+    if (grokSwitchHasFailureValue(value[names[i]], depth + 1)) return true;
+  }
+  return false;
+}
+
+function grokSwitchHasSuccessValue(value, depth) {
+  if (value == null || depth > 8 || typeof value !== "object") return false;
+  if (Object.prototype.hasOwnProperty.call(value, "success") && value.success != null) return true;
+  var names = Object.keys(value);
+  for (var i = 0; i < names.length; i += 1) {
+    if (grokSwitchHasSuccessValue(value[names[i]], depth + 1)) return true;
+  }
+  return false;
+}
+
+function grokSwitchCurrentTurnStart(messages) {
+  var start = 0;
+  for (var i = 0; i < messages.length; i += 1) {
+    if (messages[i] != null && messages[i].role === "user") start = i + 1;
+  }
+  return start;
+}
+
+function grokSwitchDeliveryHistory(messages) {
+  var calls = new Map();
+  var failed = 0;
+  var breakerCompleted = false;
+  var start = grokSwitchCurrentTurnStart(messages);
+  for (var i = start; i < messages.length; i += 1) {
+    var message = messages[i];
+    var parts = grokSwitchMessageParts(message);
+    for (var j = 0; j < parts.length; j += 1) {
+      var part = parts[j];
+      var type = part == null ? null : part.type;
+      var id = grokSwitchPartToolId(part);
+      if (message.role === "assistant" && (type === "tool-call" || type === "tool_call") && id != null && grokSwitchIsDeliveryToolName(part.toolName || part.tool_name || part.name)) {
+        calls.set(id, { breaker: id.indexOf(GROK_SWITCH_DELIVERY_BREAKER_PREFIX) === 0 });
+      } else if (message.role === "tool" && (type === "tool-result" || type === "tool_result") && id != null && calls.has(id)) {
+        var call = calls.get(id);
+        var result = part.result != null ? part.result : part;
+        if (call.breaker && grokSwitchHasSuccessValue(result, 0)) breakerCompleted = true;
+        else if (!call.breaker && grokSwitchHasFailureValue(result, 0)) failed += 1;
+      }
+    }
+  }
+  return { failed: failed, breakerCompleted: breakerCompleted };
+}
+
+function grokSwitchZeroUsage() {
+  return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+}
+
+function grokSwitchZeroExtendedUsage() {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, maxTokens: 0 };
+}
+
+function grokSwitchImmediateResponseStream(invocationId, modelId, content, events, metadata) {
+  var usage = grokSwitchZeroUsage();
+  var extended = grokSwitchZeroExtendedUsage();
+  var pump = grokSwitchPump();
+  for (var i = 0; i < events.length; i += 1) pump.push(events[i]);
+  pump.end();
+  var message = { id: invocationId, role: "assistant", content: content };
+  return {
+    fullStream: pump.iterate(),
+    usage: Promise.resolve(usage),
+    extendedUsage: Promise.resolve(extended),
+    providerMetadata: Promise.resolve(metadata || {}),
+    invocationId: Promise.resolve(invocationId),
+    response: Promise.resolve({ id: invocationId, modelId: modelId, timestamp: new Date(), messages: [message] })
+  };
+}
+
+function grokSwitchDeliveryBreakerStream(invocationId, modelId) {
+  var suffix = crypto.randomUUID().replace(/-/g, "").slice(0, 24);
+  var id = GROK_SWITCH_DELIVERY_BREAKER_PREFIX + suffix;
+  var args = {
+    type: "text",
+    content: "⚠️ 外部供应商连续返回无效的消息工具参数。grok-switch 已停止本轮自动重试，避免继续消耗额度。请重试一条新消息，或发送 `/gs official` 切回官方 Grok。"
+  };
+  var call = { type: "tool-call", toolCallId: id, toolName: "send_message", args: args };
+  return grokSwitchImmediateResponseStream(invocationId, modelId, [call], [
+    { type: "tool-call-streaming-start", toolCallId: id, toolName: "send_message" },
+    call,
+    { type: "finish", finishReason: "tool-calls", usage: grokSwitchZeroUsage(), extendedUsage: grokSwitchZeroExtendedUsage() }
+  ], { grokSwitch: { deliveryBreaker: true } });
+}
+
+function grokSwitchSilentCompletionStream(invocationId, modelId) {
+  return grokSwitchImmediateResponseStream(invocationId, modelId, [], [
+    { type: "finish", finishReason: "stop", usage: grokSwitchZeroUsage(), extendedUsage: grokSwitchZeroExtendedUsage() }
+  ], { grokSwitch: { deliveryBreakerCompleted: true } });
+}
+
+function grokSwitchDeliveryIntervention(messages, invocationId, modelId) {
+  var history = grokSwitchDeliveryHistory(messages);
+  if (history.breakerCompleted) return grokSwitchSilentCompletionStream(invocationId, modelId);
+  if (history.failed >= GROK_SWITCH_DELIVERY_BREAKER_THRESHOLD) return grokSwitchDeliveryBreakerStream(invocationId, modelId);
+  return null;
 }
 
 function grokSwitchAttachOpaqueState(message, state) {
@@ -1032,8 +1159,12 @@ function grokSwitchExecutorClass() {
       stream(ctx, invocationId, tools, options) {
         var route = this._grokSwitchRoute;
         if (route.kind === "error") return grokSwitchFailedStream(route.message);
+        var messages = this.getMessages();
+        var id = invocationId == null || invocationId === "" ? crypto.randomUUID() : invocationId;
+        var intervention = grokSwitchDeliveryIntervention(messages, id, route.provider.model);
+        if (intervention != null) return intervention;
         return grokSwitchStream(route.provider, {
-          messages: this.getMessages(),
+          messages: messages,
           tools: tools,
           options: options,
           signal: ctx == null ? void 0 : ctx.signal,

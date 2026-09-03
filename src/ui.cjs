@@ -276,7 +276,7 @@ function uiServe(port) {
       var actualPort = server.address().port;
       var panelUrl = "http://127.0.0.1:" + actualPort + "/?t=" + token;
       cliFs.mkdirSync(CLI_CONFIG_DIR, { recursive: true, mode: 448 });
-      cliFs.writeFileSync(UI_STATE_PATH, JSON.stringify({ pid: process.pid, port: actualPort, url: panelUrl, startedAt: new Date().toISOString() }), { mode: 384 });
+      cliFs.writeFileSync(UI_STATE_PATH, JSON.stringify({ pid: process.pid, port: actualPort, url: panelUrl, version: CLI_VERSION, startedAt: new Date().toISOString() }), { mode: 384 });
       resolve({ server: server, url: panelUrl });
     });
   });
@@ -294,7 +294,25 @@ async function uiCommand(args) {
     return cliPrint("panel stopped (pid " + existing.pid + ")");
   }
   if (sub === "status") {
-    return cliPrint(existing == null ? "panel is not running" : "panel running: " + existing.url + " (pid " + existing.pid + ")");
+    return cliPrint(existing == null ? "panel is not running" : "panel running: " + existing.url + " (pid " + existing.pid + ", version " + (existing.version || "unknown") + ")");
+  }
+  if (existing != null && existing.version !== CLI_VERSION) {
+    cliPrint("replacing stale panel version " + (existing.version || "unknown") + " with " + CLI_VERSION);
+    process.kill(existing.pid, "SIGTERM");
+    for (var wait = 0; wait < 40; wait += 1) {
+      await new Promise(function (resolve) {
+        setTimeout(resolve, 50);
+      });
+      try {
+        process.kill(existing.pid, 0);
+      } catch (_stopped) {
+        break;
+      }
+    }
+    try {
+      cliFs.unlinkSync(UI_STATE_PATH);
+    } catch (_error) {}
+    existing = null;
   }
   if (existing != null) {
     cliPrint("panel already running: " + existing.url);

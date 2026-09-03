@@ -328,6 +328,7 @@ test("ui panel: token-gated API drives save, probe, use, official and stop", asy
     const tok = url.slice(url.indexOf("t=") + 2);
     const state = JSON.parse(fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "ui.json"), "utf8"));
     assert.equal(state.url, url);
+    assert.equal(state.version, "0.6.5");
 
     const page = await fetch(base + "/");
     assert.equal(page.status, 200);
@@ -366,6 +367,14 @@ test("ui panel: token-gated API drives save, probe, use, official and stop", asy
     assert.match(r.out, /panel running: http/);
     r = await runAsync(env, "ui", "--background");
     assert.match(r.out, /panel already running/);
+    const stale = JSON.parse(fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "ui.json"), "utf8"));
+    stale.version = "0.6.1";
+    fs.writeFileSync(path.join(env.GROK_SWITCH_DIR, "ui.json"), JSON.stringify(stale));
+    r = await runAsync(env, "ui", "--background", "--port", String(stale.port));
+    assert.match(r.out, /replacing stale panel version 0\.6\.1 with 0\.6\.5/);
+    const replaced = JSON.parse(fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "ui.json"), "utf8"));
+    assert.equal(replaced.version, "0.6.5");
+    assert.notEqual(replaced.pid, stale.pid);
     r = await runAsync(env, "ui", "stop");
     assert.match(r.out, /panel stopped/);
     await new Promise((resolve) => setTimeout(resolve, 200));

@@ -10,6 +10,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const SRC = join(ROOT, "..", "src", "protocols");
 const FIXTURES = join(ROOT, "fixtures", "protocols");
 const protocols = require("../src/protocols/index.cjs");
+const protocolTools = require("../src/protocols/tools.cjs");
 
 const PROTOCOL_IDS = ["openai-chat", "openai-responses", "anthropic-messages"];
 
@@ -169,6 +170,65 @@ test("request mapping preserves text, tools, and exact tool_call_id", () => {
     const blob = JSON.stringify(toolBuilt.body);
     assert.match(blob, /call_abc/);
     assert.equal(blob.includes("Authorization"), false);
+  }
+});
+
+test("SendMessage text calls drop only empty inactive payload branches", () => {
+  const raw = {
+    type: "text",
+    content: "hello",
+    widget: {},
+    secret: {},
+    images: [],
+    reply_to: "",
+    metadata: { keep: true }
+  };
+  for (const id of PROTOCOL_IDS) {
+    assert.deepEqual(
+      protocolTools.parseToolArgumentsObject(JSON.stringify(raw), id, "send_message"),
+      { type: "text", content: "hello", metadata: { keep: true } },
+      id
+    );
+  }
+  assert.deepEqual(
+    protocolTools.parseToolArgumentsObject(JSON.stringify(raw), "openai-responses", "alpha"),
+    raw,
+    "unrelated tools are byte-semantically unchanged"
+  );
+  const conflicting = { type: "text", content: "hello", widget: { prompt: "real" } };
+  assert.deepEqual(
+    protocolTools.parseToolArgumentsObject(JSON.stringify(conflicting), "openai-responses", "send_message"),
+    conflicting,
+    "non-empty conflicting branches must still reach host validation"
+  );
+
+  const args = JSON.stringify(raw);
+  const streams = {
+    "openai-chat": [
+      `data: ${JSON.stringify({ id: "c", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_send", type: "function", function: { name: "send_message", arguments: args } }] } }] })}`,
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}`,
+      "data: [DONE]"
+    ].join("\n\n") + "\n\n",
+    "openai-responses": [
+      { type: "response.created", response: { id: "r" } },
+      { type: "response.output_item.added", output_index: 0, item: { id: "fc", type: "function_call", call_id: "call_send", name: "send_message", arguments: args } },
+      { type: "response.output_item.done", output_index: 0, item: { id: "fc", type: "function_call", call_id: "call_send", name: "send_message", arguments: args } },
+      { type: "response.completed", response: { id: "r", status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 }, output: [{ type: "function_call", call_id: "call_send" }] } }
+    ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+    "anthropic-messages": [
+      `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "m", usage: { input_tokens: 1 } } })}`,
+      `event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_send", name: "send_message", input: raw } })}`,
+      `event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}`,
+      `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } })}`,
+      `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}`
+    ].join("\n\n") + "\n\n"
+  };
+  for (const id of PROTOCOL_IDS) {
+    assert.deepEqual(semantics(decode(protocols.getAdapter(id), streams[id])).toolCalls[0].args, {
+      type: "text",
+      content: "hello",
+      metadata: { keep: true }
+    }, `${id} decoder applies the repair`);
   }
 });
 

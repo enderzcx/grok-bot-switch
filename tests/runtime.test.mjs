@@ -303,6 +303,57 @@ test("shapes the protocol cannot express fail fast with visible text", async () 
   assert.equal(host.fetches.length, 0);
 });
 
+test("repeated failed SendMessage calls trip one visible breaker without another provider request", async () => {
+  const provider = { ...OPENAI, protocol: "openai-responses", model: "gpt-5.6-sol" };
+  const files = new Map([[CONFIG_PATH, config("main", { main: provider })]]);
+  const host = loadHost({ files, fetchImpl: () => assert.fail("breaker must not bill the provider") });
+  const failed = (id) => [
+    {
+      role: "assistant",
+      content: [{ type: "tool-call", toolCallId: id, toolName: "send_message", args: { type: "text", content: "x", widget: {}, secret: {} } }]
+    },
+    {
+      role: "tool",
+      content: [{
+        type: "tool-result",
+        toolCallId: id,
+        toolName: "send_message",
+        result: { error: { error: "Invalid arguments: Nothing was sent." } }
+      }]
+    }
+  ];
+  const messages = [{ role: "user", content: "hello" }, ...failed("bad-1"), ...failed("bad-2")];
+  const session = host.inference.createSession(null, { requestSource: "turn" });
+  const first = await drain(session.getExecutor(messages).stream({}, "breaker-inv", [], {}));
+  assert.equal(first.streamError, null);
+  assert.equal(host.fetches.length, 0);
+  const call = first.events.find((event) => event.type === "tool-call");
+  assert.equal(call.toolName, "send_message");
+  assert.equal(call.args.type, "text");
+  assert.match(call.args.content, /停止本轮自动重试/);
+  assert.match(call.toolCallId, /^grok_switch_delivery_breaker_/);
+  assert.equal(first.events.at(-1).finishReason, "tool-calls");
+
+  const completedMessages = [
+    ...messages,
+    first.response.value.messages[0],
+    {
+      role: "tool",
+      content: [{
+        type: "tool-result",
+        toolCallId: call.toolCallId,
+        toolName: "send_message",
+        result: { success: { timestamp: 1, messageId: "sent" } }
+      }]
+    }
+  ];
+  const second = await drain(host.inference.createSession(null, { requestSource: "turn" }).getExecutor(completedMessages).stream({}, "after-breaker", [], {}));
+  assert.equal(second.streamError, null);
+  assert.equal(host.fetches.length, 0);
+  assert.deepEqual(plain(second.response.value.messages[0].content), []);
+  assert.equal(second.events.at(-1).finishReason, "stop");
+});
+
 test("anthropic providers get x-api-key, anthropic-version and a default max_tokens", async () => {
   const provider = { protocol: "anthropic-messages", baseUrl: "https://claude.example.com/", model: "claude-x", apiKey: "ak" };
   const files = new Map([[CONFIG_PATH, config("c", { c: provider })]]);
@@ -390,6 +441,9 @@ test("/gs commands in chat are answered locally on both routes and edit config.j
   // Non-main sessions (summarization etc.) never intercept.
   out = await chat(host, "/gs status", { isSummarizationSession: true });
   assert.equal(host.originalCalls.filter((c) => c.streamed).length, 2);
+
+  out = await chat(host, "/gs status", { requestSource: "turn" });
+  assert.match(out.events[0].textDelta, /Active:/, "Grok Bot 0.30 names the main request source turn");
 });
 
 test("/gs official repairs a broken active pointer", async () => {

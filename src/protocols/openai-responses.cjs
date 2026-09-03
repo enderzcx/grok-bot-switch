@@ -291,7 +291,7 @@ function createResponsesState(requestId) {
       type: "tool-call",
       toolCallId: current.callId,
       toolName: current.name,
-      args: tools.parseToolArgumentsObject(current.arguments, PROTOCOL_ID)
+      args: tools.parseToolArgumentsObject(current.arguments, PROTOCOL_ID, current.name)
     });
     current.finalized = true;
   }

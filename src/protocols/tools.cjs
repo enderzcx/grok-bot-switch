@@ -43,13 +43,39 @@ function jsonArgumentString(args, protocolId) {
   }
 }
 
-function parseToolArgumentsObject(raw, protocolId) {
+function isEmptyOptionalValue(value) {
+  if (value == null || value === "") return true;
+  if (Array.isArray(value)) return value.length === 0;
+  return typeof value === "object" && Object.keys(value).length === 0;
+}
+
+function isSendMessageTool(name) {
+  return typeof name === "string" && /^(?:send_?message|send_?to_?user)$/i.test(name);
+}
+
+// Grok Bot's SendMessage schema has mutually-exclusive optional branches.
+// Some OpenAI-compatible providers materialize absent branches as {}, [], or
+// "", which makes the host reject an otherwise valid text message forever.
+// Remove only empty optional values; non-empty conflicts still fail closed.
+function normalizeToolArguments(name, args) {
+  if (!isSendMessageTool(name) || args == null || typeof args !== "object" || Array.isArray(args)) return args;
+  var out = {};
+  var names = Object.keys(args);
+  for (var i = 0; i < names.length; i += 1) {
+    var key = names[i];
+    if (key !== "type" && isEmptyOptionalValue(args[key])) continue;
+    out[key] = args[key];
+  }
+  return out;
+}
+
+function parseToolArgumentsObject(raw, protocolId, toolName) {
   var text = raw == null ? "" : String(raw);
   if (text.trim().length === 0) {
     return {};
   }
   try {
-    return JSON.parse(text);
+    return normalizeToolArguments(toolName, JSON.parse(text));
   } catch (_error) {
     throw contract.protocolError("Tool call has invalid final JSON arguments", {
       protocol: protocolId,
@@ -403,6 +429,7 @@ module.exports = {
   convertFunctionTools: convertFunctionTools,
   jsonArgumentString: jsonArgumentString,
   parseToolArgumentsObject: parseToolArgumentsObject,
+  normalizeToolArguments: normalizeToolArguments,
   extractSystemText: extractSystemText,
   extractUserParts: extractUserParts,
   extractAssistantPayload: extractAssistantPayload,
