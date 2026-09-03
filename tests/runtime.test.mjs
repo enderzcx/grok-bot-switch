@@ -229,7 +229,10 @@ test("active provider streams through the adapter with auth headers and records 
   assert.equal(host.fetches[0].init.headers.authorization, "Bearer sk-secret");
   assert.equal(host.fetches[0].init.redirect, "error");
   assert.equal(host.fetches[0].body.model, "gpt-x");
-  assert.deepEqual(host.fetches[0].body.messages, [{ role: "user", content: "hi" }]);
+  // The identity note is inserted after the host's system prompt(s), before the conversation.
+  assert.deepEqual(host.fetches[0].body.messages.map((m) => m.role), ["system", "user"]);
+  assert.match(host.fetches[0].body.messages[0].content, /^\[grok-switch\] .*gpt-x.*main.*grok-switch 接入/);
+  assert.deepEqual(host.fetches[0].body.messages[1], { role: "user", content: "hi" });
   assert.equal(out.events.filter((e) => e.type === "text-delta").map((e) => e.textDelta).join(""), "hello world");
   assert.equal(out.usage.ok, true);
   assert.deepEqual(plain(out.usage.value), { promptTokens: 9, completionTokens: 4, totalTokens: 13 });
@@ -250,6 +253,34 @@ test("active provider streams through the adapter with auth headers and records 
   assert.equal(log[0].kind, "main");
   assert.deepEqual(log[0].usage, { promptTokens: 9, completionTokens: 4, totalTokens: 13 });
   assert.ok(!JSON.stringify(log).includes("sk-secret"));
+});
+
+test("identity note follows existing system prompts and is skipped for probes", async () => {
+  const files = new Map([[CONFIG_PATH, config("main", { main: OPENAI })]]);
+  const text = fs.readFileSync(path.join(FIXTURES, "openai-chat", "text.sse"), "utf8");
+  const host = loadHost({ files, fetchImpl: () => sse(text) });
+  const history = [
+    { role: "system", content: "You are Grok Bot." },
+    { role: "system", content: "Tools: ..." },
+    { role: "user", content: "你是什么模型" }
+  ];
+  await drain(host.inference.createSession(null, {}).getExecutor(history).stream({}, "i", [], {}));
+  const roles = host.fetches[0].body.messages.map((m) => m.role);
+  assert.deepEqual(roles, ["system", "system", "system", "user"]);
+  assert.equal(host.fetches[0].body.messages[0].content, "You are Grok Bot.");
+  assert.match(host.fetches[0].body.messages[2].content, /^\[grok-switch\]/);
+
+  // Responses folds system messages into `instructions`; the note rides along.
+  const responsesFiles = new Map([[CONFIG_PATH, config("r", { r: { ...OPENAI, protocol: "openai-responses" } })]]);
+  const rHost = loadHost({ files: responsesFiles, fetchImpl: () => sse(fs.readFileSync(path.join(FIXTURES, "openai-responses", "text.sse"), "utf8")) });
+  await drain(rHost.inference.createSession(null, {}).getExecutor(history).stream({}, "i", [], {}));
+  assert.match(rHost.fetches[0].body.instructions, /You are Grok Bot\.\n\nTools: \.\.\.\n\n\[grok-switch\]/);
+
+  // The CLI probe (`test`) sends the bare message so a broken provider is judged on its own.
+  const probeHost = loadHost({ files, fetchImpl: () => sse(text) });
+  const provider = probeHost.context.grokSwitchNormalizeProvider("main", OPENAI);
+  await drain(probeHost.context.grokSwitchStream(provider, { messages: [{ role: "user", content: "OK?" }], tools: [], options: {}, requestKind: "test" }));
+  assert.deepEqual(plain(probeHost.fetches[0].body.messages), [{ role: "user", content: "OK?" }]);
 });
 
 test("editing config.json between sessions switches routes without reloading", async () => {

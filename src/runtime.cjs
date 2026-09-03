@@ -947,6 +947,24 @@ function grokSwitchDeliveryIntervention(messages, invocationId, modelId) {
   return null;
 }
 
+// Grok Bot's own system prompt says "you are Grok Bot" and nothing about the
+// model, so an external model asked "what model are you" can only guess. A
+// short system note after the host's system prompt lets it answer truthfully.
+function grokSwitchIdentityNote(provider) {
+  return {
+    role: "system",
+    content: "[grok-switch] 当前实际为你提供推理的模型是 " + provider.model + "（供应商配置名 " + provider.name + "，通过 grok-switch 接入，不是 Grok 官方模型）。当用户询问你是什么模型或底层模型时，如实说明这一点；其余行为仍遵循上文的 Grok Bot 指令。"
+  };
+}
+
+function grokSwitchWithIdentityNote(messages, provider) {
+  var out = messages.slice();
+  var insertAt = 0;
+  while (insertAt < out.length && out[insertAt] != null && out[insertAt].role === "system") insertAt += 1;
+  out.splice(insertAt, 0, grokSwitchIdentityNote(provider));
+  return out;
+}
+
 function grokSwitchAttachOpaqueState(message, state) {
   message.providerState = state;
   var options = grokSwitchShallowCopy(message.providerOptions) || {};
@@ -1126,7 +1144,7 @@ function grokSwitchStream(provider, input) {
       var adapter = grokSwitchProtocols().getAdapter(provider.protocol);
       var normalized = {
         model: provider.model,
-        messages: grokSwitchHydrateMessages(messages),
+        messages: requestKind === "test" ? grokSwitchHydrateMessages(messages) : grokSwitchWithIdentityNote(grokSwitchHydrateMessages(messages), provider),
         tools: tools,
         stream: true
       };
