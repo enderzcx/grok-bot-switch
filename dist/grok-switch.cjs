@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// grok-switch 0.6.7 - https://github.com/enderzcx/grok-bot-switch
+// grok-switch 0.7.0 - https://github.com/enderzcx/grok-bot-switch
 // Single-file build. Do not edit; regenerate with `node build.mjs`.
 "use strict";
 // GROK_SWITCH_PAYLOAD_BEGIN
@@ -4711,137 +4711,289 @@ async function uiCommand(args) {
 }
 
 var UI_HTML = String.raw`<!doctype html>
-<html lang="zh">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Grok Bot Switch</title>
 <style>
-:root{--bg:#f6f7f9;--card:#fff;--text:#1a1d21;--muted:#6b7280;--line:#e5e7eb;--accent:#2563eb;--accent-text:#fff;--ok:#16a34a;--bad:#dc2626;--warn:#d97706;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-@media(prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#171a21;--text:#e6e8eb;--muted:#9aa1ab;--line:#2a2f3a;--accent:#3b82f6}}
-*{box-sizing:border-box}body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Noto Sans SC",sans-serif;background:var(--bg);color:var(--text)}
-main{max-width:880px;margin:0 auto;padding:24px 16px 64px}
-h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:0 0 12px}.sub{color:var(--muted);margin:0 0 20px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
-.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.grow{flex:1}
-.kv{display:grid;grid-template-columns:110px 1fr;gap:6px 12px;font-size:14px}.kv dt{color:var(--muted)}.kv dd{margin:0;word-break:break-all}
-.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;background:var(--line)}
-.pill.ok{background:rgba(22,163,74,.15);color:var(--ok)}.pill.bad{background:rgba(220,38,38,.15);color:var(--bad)}.pill.warn{background:rgba(217,119,6,.15);color:var(--warn)}
-button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);padding:7px 14px;border-radius:8px;cursor:pointer}
-button:hover{border-color:var(--accent)}button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}button.danger{color:var(--bad)}button:disabled{opacity:.5;cursor:default}
-input,select{font:inherit;width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text)}
-label{display:block;font-size:13px;color:var(--muted);margin-bottom:4px}.field{margin-bottom:12px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:600px){.grid2{grid-template-columns:1fr}}
-.provider{display:flex;gap:12px;align-items:center;padding:12px 0;border-top:1px solid var(--line)}.provider:first-of-type{border-top:0}
-.provider .name{font-weight:600}.provider .summary{font-size:13px;color:var(--muted);word-break:break-all}
-pre{font-family:var(--mono);font-size:12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;white-space:pre-wrap;word-break:break-all;max-height:240px;overflow:auto;margin:10px 0 0}
-.msg{margin-top:10px;font-size:14px}.msg.ok{color:var(--ok)}.msg.bad{color:var(--bad)}
-.code{font-family:var(--mono);font-size:26px;letter-spacing:2px;font-weight:700}
-a{color:var(--accent)}small{color:var(--muted)}
-table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;padding:6px 8px;border-top:1px solid var(--line)}th{color:var(--muted);font-weight:500;border-top:0}
+:root{
+  --bg:#f5f6f8;--card:#fff;--text:#111827;--muted:#6b7280;--line:#e5e7eb;--line-strong:#d1d5db;
+  --primary:#2563eb;--primary-text:#fff;--primary-soft:rgba(37,99,235,.10);
+  --ok:#15803d;--ok-soft:rgba(21,128,61,.12);--bad:#dc2626;--bad-soft:rgba(220,38,38,.10);--warn:#b45309;--warn-soft:rgba(180,83,9,.12);
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--radius:14px;--shadow:0 1px 2px rgba(0,0,0,.04),0 8px 24px -12px rgba(0,0,0,.12)
+}
+@media(prefers-color-scheme:dark){:root{--bg:#0b0d12;--card:#151922;--text:#e5e7eb;--muted:#9ca3af;--line:#262b36;--line-strong:#343a47;--primary:#3b82f6;--primary-soft:rgba(59,130,246,.16);--ok:#22c55e;--ok-soft:rgba(34,197,94,.14);--bad:#f87171;--bad-soft:rgba(248,113,113,.14);--warn:#f59e0b;--warn-soft:rgba(245,158,11,.14);--shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.6)}}
+*{box-sizing:border-box}html,body{margin:0}
+body{font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Noto Sans SC",sans-serif;background:var(--bg);color:var(--text)}
+button{font:inherit;cursor:pointer}
+.app{max-width:760px;margin:0 auto;padding:20px 16px 96px}
+/* top bar */
+.topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.brand{display:flex;align-items:center;gap:10px}
+.logo{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#7c3aed);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:15px}
+.brand h1{font-size:17px;margin:0;line-height:1.2}.brand small{color:var(--muted);font-size:12px}
+.icon-btn{border:1px solid var(--line);background:var(--card);color:var(--muted);border-radius:10px;padding:7px 10px;font-size:13px}
+.icon-btn:hover{color:var(--text);border-color:var(--line-strong)}
+/* status strip */
+.status{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px 16px;margin-bottom:18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.status .now{flex:1;min-width:200px}
+.status .now .label{font-size:12px;color:var(--muted)}
+.status .now .value{font-size:16px;font-weight:650;margin-top:2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.status .now .sub{font-size:12px;color:var(--muted);font-family:var(--mono);word-break:break-all;margin-top:2px}
+.dots{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.dot{display:inline-flex;align-items:center;gap:6px}
+.dot::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--line-strong)}
+.dot.ok::before{background:var(--ok)}.dot.warn::before{background:var(--warn)}.dot.bad::before{background:var(--bad)}
+/* section headers */
+.section{display:flex;align-items:center;justify-content:space-between;margin:6px 2px 10px}
+.section h2{font-size:13px;letter-spacing:.02em;text-transform:uppercase;color:var(--muted);margin:0;font-weight:600}
+/* cards */
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px 16px;margin-bottom:10px;position:relative;transition:border-color .15s}
+.card.active{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-soft),var(--shadow)}
+.card-row{display:flex;gap:12px;align-items:flex-start}
+.avatar{width:38px;height:38px;border-radius:10px;flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;background:var(--bg);border:1px solid var(--line);color:var(--text)}
+.avatar.grok{background:#111;color:#fff;border-color:#111}.avatar.oa{background:#0f9d7a;color:#fff;border-color:#0f9d7a}.avatar.an{background:#d97757;color:#fff;border-color:#d97757}.avatar.gpt{background:#000;color:#fff;border-color:#000}
+.card-main{flex:1;min-width:0}
+.title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.title h3{font-size:15px;margin:0;font-weight:650;word-break:break-all}
+.badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:var(--bg);border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.badge.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}.badge.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}.badge.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}.badge.info{background:var(--primary-soft);color:var(--primary);border-color:transparent}
+.endpoint{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:4px;word-break:break-all}
+.meta{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:4px}
+.actions{display:flex;gap:6px;flex:none;align-items:center}
+.btn{border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:9px;padding:7px 12px;font-size:13px;white-space:nowrap}
+.btn:hover{border-color:var(--line-strong);background:var(--bg)}
+.btn.primary{background:var(--primary);border-color:var(--primary);color:var(--primary-text)}.btn.primary:hover{filter:brightness(1.05);background:var(--primary)}
+.btn.ghost{border-color:transparent;color:var(--muted);padding:7px 8px}.btn.ghost:hover{color:var(--text);background:var(--bg)}
+.btn.danger{color:var(--bad)}.btn.danger:hover{background:var(--bad-soft)}
+.btn:disabled{opacity:.45;cursor:default;filter:none}
+.btn.lg{padding:10px 16px;font-size:14px}
+@media(max-width:560px){.card-row{flex-wrap:wrap}.actions{width:100%;justify-content:flex-end;margin-top:6px}}
+.empty{text-align:center;color:var(--muted);padding:28px 16px;border:1px dashed var(--line-strong);border-radius:var(--radius);margin-bottom:10px}
+/* codex card */
+.code{font-family:var(--mono);font-size:28px;letter-spacing:3px;font-weight:700;color:var(--primary)}
+.steps{margin:10px 0 0;padding-left:18px;font-size:13px}.steps li{margin:4px 0}
+/* fab */
+.fab{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);padding:12px 22px;border-radius:999px;background:var(--primary);color:#fff;border:0;font-size:15px;font-weight:600;box-shadow:0 10px 30px -8px rgba(37,99,235,.6);z-index:5}
+.fab:hover{filter:brightness(1.06)}
+/* dialogs */
+dialog{border:0;border-radius:16px;padding:0;background:var(--card);color:var(--text);box-shadow:0 30px 80px -20px rgba(0,0,0,.4);width:min(560px,calc(100vw - 32px));max-height:calc(100vh - 40px)}
+dialog::backdrop{background:rgba(0,0,0,.45);backdrop-filter:blur(2px)}
+.dlg-head{display:flex;align-items:center;justify-content:space-between;padding:18px 20px 0}
+.dlg-head h2{font-size:17px;margin:0}
+.dlg-body{padding:16px 20px 4px;overflow:auto;max-height:calc(100vh - 190px)}
+.dlg-foot{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px 18px;border-top:1px solid var(--line);margin-top:8px}
+.field{margin-bottom:12px}
+.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px;font-weight:500}
+input,select{font:inherit;width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text)}
+input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(--primary)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:480px){.grid2{grid-template-columns:1fr}}
+.presets{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.preset{border:1px solid var(--line);background:var(--bg);border-radius:999px;padding:5px 11px;font-size:12px;color:var(--text)}
+.preset.on{background:var(--primary);color:#fff;border-color:var(--primary)}
+.hint{font-size:12px;color:var(--muted);margin-top:5px;word-break:break-all}
+details.adv summary{cursor:pointer;color:var(--muted);font-size:13px;margin:4px 0 10px;list-style:none}
+details.adv summary::before{content:"▸ "}details.adv[open] summary::before{content:"▾ "}
+.form-msg{font-size:13px;margin-top:6px;min-height:18px}.form-msg.ok{color:var(--ok)}.form-msg.bad{color:var(--bad)}
+/* toast */
+.toasts{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;z-index:20;width:min(520px,calc(100vw - 32px))}
+.toast{background:#111827;color:#f9fafb;padding:11px 14px;border-radius:12px;font-size:13px;box-shadow:0 12px 30px -10px rgba(0,0,0,.5);animation:in .18s ease-out;word-break:break-all}
+.toast.ok{background:#14532d}.toast.bad{background:#7f1d1d}
+@keyframes in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+/* footer sections */
+.usage{width:100%;border-collapse:collapse;font-size:13px}.usage th,.usage td{text-align:left;padding:8px 8px;border-top:1px solid var(--line)}.usage th{border-top:0;color:var(--muted);font-weight:500;font-size:12px}
+.usage td:not(:first-child),.usage th:not(:first-child){text-align:right}
+pre.log{font-family:var(--mono);font-size:12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;white-space:pre-wrap;word-break:break-all;max-height:220px;overflow:auto;margin:10px 0 0}
+details.more summary{cursor:pointer;list-style:none;padding:4px 2px;color:var(--muted);font-size:13px}
+details.more summary::before{content:"▸ "}details.more[open] summary::before{content:"▾ "}
+.help{font-size:13px;color:var(--muted);line-height:1.7}.help code{font-family:var(--mono);background:var(--bg);padding:1px 6px;border-radius:6px;border:1px solid var(--line)}
 </style>
 </head>
-<body><main>
-<h1>Grok Bot Switch <small id="version"></small></h1>
-<p class="sub">选择 Grok Bot 用哪个模型。切换下一条消息生效；也可以在聊天里发 <code>/gs use 名字</code>、<code>/gs official</code>。</p>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand"><div class="logo">GS</div><div><h1>Grok Bot Switch</h1><small id="version"></small></div></div>
+    <div style="display:flex;gap:6px">
+      <button class="icon-btn" id="btn-help">聊天命令</button>
+      <button class="icon-btn" id="btn-refresh">刷新</button>
+    </div>
+  </div>
 
-<section class="card" id="status-card">
-<div class="row" style="margin-bottom:12px"><h2 class="grow" style="margin:0">状态</h2><button onclick="refresh()">刷新</button></div>
-<dl class="kv" id="status"></dl>
-<div class="row" style="margin-top:12px"><button id="btn-official" onclick="act('/api/official')">切回官方 Grok</button><button onclick="act('/api/restart')">请求重启主程序</button><button class="danger" onclick="confirm('去掉补丁并恢复原厂主程序？已保存的供应商不会删除。')&&act('/api/restore')">卸载补丁</button></div>
-<div id="status-msg" class="msg"></div>
-</section>
+  <div class="status" id="status"></div>
 
-<section class="card">
-<h2>供应商</h2>
-<div id="providers"></div>
-<div id="providers-msg" class="msg"></div>
-</section>
+  <div class="section"><h2>模型来源</h2><span id="count" style="font-size:12px;color:var(--muted)"></span></div>
+  <div id="list"></div>
 
-<section class="card">
-<h2>添加或修改供应商</h2>
-<form id="form" onsubmit="saveProvider(event)">
-<div class="grid2">
-<div class="field"><label>名字（给自己看的，英文数字）</label><input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" placeholder="myapi"></div>
-<div class="field"><label>协议</label><select name="protocol" onchange="protocolChanged()"><option value="openai-chat">OpenAI Chat Completions（大多数中转站、DeepSeek、xAI）</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages（Claude）</option></select></div>
+  <div class="section" style="margin-top:22px"><h2>ChatGPT 订阅</h2></div>
+  <div class="card" id="codex"></div>
+
+  <div class="section" style="margin-top:22px"><h2>用量与记录</h2></div>
+  <div class="card" id="usage"></div>
+
+  <details class="more" style="margin-top:14px"><summary>主程序与补丁状态 · 维护操作</summary>
+    <div class="card" style="margin-top:8px" id="host"></div>
+  </details>
 </div>
-<div class="field"><label>接口根地址</label><input name="baseUrl" required placeholder="https://api.example.com/v1"><small id="url-hint"></small></div>
-<div class="grid2">
-<div class="field"><label>模型</label><input name="model" required placeholder="gpt-5"></div>
-<div class="field"><label>API key <small>（修改已有供应商时留空 = 不改）</small></label><input name="apiKey" type="password" autocomplete="off" placeholder="sk-..."></div>
-</div>
-<details><summary style="cursor:pointer;color:var(--muted);font-size:13px">高级选项</summary>
-<div class="grid2" style="margin-top:10px">
-<div class="field"><label>认证方式</label><select name="authType"><option value="">按协议默认</option><option value="bearer">Authorization: Bearer</option><option value="x-api-key">x-api-key</option><option value="none">无</option></select></div>
-<div class="field"><label>自定义请求路径</label><input name="endpointPath" placeholder="/v1/chat/completions"></div>
-<div class="field"><label>reasoning effort（OpenAI）</label><input name="reasoning" placeholder="medium"></div>
-<div class="field"><label>max tokens</label><input name="maxTokens" type="number" min="1" placeholder="Anthropic 默认 8192"></div>
-</div>
-<div class="field"><label>额外请求头（每行一个，Name: value）</label><input name="headers" placeholder="X-Team: blue"></div>
-</details>
-<div class="row" style="margin-top:8px"><button class="primary" type="submit" id="btn-save">保存并测试</button><label class="row" style="margin:0"><input type="checkbox" name="useNow" style="width:auto" checked> 测试通过后立即切换到它</label></div>
-</form>
-<div id="form-msg" class="msg"></div>
-</section>
 
-<section class="card" id="codex-card">
-<h2>用 ChatGPT 订阅（Codex 登录）</h2>
-<p class="sub" style="margin-bottom:12px">不需要 API key，用你的 ChatGPT Plus/Pro 额度。登录在你自己的设备上完成，云端只保存登录凭据。<b>注意</b>：这是让 Codex 后端为非 Codex 程序提供服务，OpenAI 条款上属擦边，账号有被限的可能。</p>
-<div id="codex"></div>
-</section>
+<button class="fab" id="fab">＋ 添加模型来源</button>
 
-<section class="card">
-<h2>用量与最近请求</h2>
-<div id="usage"></div>
-<pre id="recent" style="display:none"></pre>
-</section>
-</main>
+<dialog id="dlg-provider">
+  <div class="dlg-head"><h2 id="dlg-title">添加模型来源</h2><button class="btn ghost" data-close>✕</button></div>
+  <form id="form" class="dlg-body" novalidate>
+    <div class="presets" id="presets"></div>
+    <div class="grid2">
+      <div class="field"><label>名字（用于 /gs use 名字）</label><input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" placeholder="myapi" autocomplete="off"></div>
+      <div class="field"><label>协议</label><select name="protocol"><option value="openai-chat">OpenAI Chat Completions（推荐，兼容最广）</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages（Claude）</option></select></div>
+    </div>
+    <div class="field"><label>接口根地址</label><input name="baseUrl" required placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false"><div class="hint" id="url-hint"></div></div>
+    <div class="grid2">
+      <div class="field"><label>模型</label><input name="model" required placeholder="gpt-5" autocomplete="off" spellcheck="false"></div>
+      <div class="field"><label>API key <span id="key-note" style="color:var(--muted)"></span></label><input name="apiKey" type="password" autocomplete="new-password" placeholder="sk-..."></div>
+    </div>
+    <details class="adv"><summary>高级选项</summary>
+      <div class="grid2">
+        <div class="field"><label>认证方式</label><select name="authType"><option value="">按协议默认</option><option value="bearer">Authorization: Bearer</option><option value="x-api-key">x-api-key</option><option value="none">无</option></select></div>
+        <div class="field"><label>自定义请求路径</label><input name="endpointPath" placeholder="/v1/chat/completions" autocomplete="off"></div>
+        <div class="field"><label>reasoning effort（OpenAI）</label><input name="reasoning" placeholder="medium" autocomplete="off"></div>
+        <div class="field"><label>max tokens</label><input name="maxTokens" type="number" min="1" placeholder="Anthropic 默认 8192"></div>
+      </div>
+      <div class="field"><label>额外请求头（每行一个，Name: value）</label><input name="headers" placeholder="X-Team: blue" autocomplete="off"></div>
+    </details>
+    <div class="form-msg" id="form-msg"></div>
+  </form>
+  <div class="dlg-foot"><button class="btn" data-close>取消</button><button class="btn" id="btn-save-only">测试并保存</button><button class="btn primary" id="btn-save-use">测试、保存并使用</button></div>
+</dialog>
+
+<dialog id="dlg-confirm">
+  <div class="dlg-head"><h2 id="confirm-title">确认</h2></div>
+  <div class="dlg-body" id="confirm-body" style="font-size:14px"></div>
+  <div class="dlg-foot"><button class="btn" data-close>取消</button><button class="btn danger" id="confirm-ok">确定</button></div>
+</dialog>
+
+<dialog id="dlg-help">
+  <div class="dlg-head"><h2>在聊天里切换</h2><button class="btn ghost" data-close>✕</button></div>
+  <div class="dlg-body help">
+    这些消息在云端主程序里直接处理，不发给任何模型、不花 token，任何平台都一样：<br>
+    <code>/gs use 名字</code> 切到某个模型来源，下一条消息生效<br>
+    <code>/gs official</code> 切回官方 Grok<br>
+    <code>/gs status</code> 看当前走哪里、保存了哪些来源<br><br>
+    添加来源（带 key）只能在这个面板或云端终端里做；<code>/gs</code> 命令不接受 key。
+  </div>
+  <div class="dlg-foot"><button class="btn primary" data-close>知道了</button></div>
+</dialog>
+
+<div class="toasts" id="toasts"></div>
+
 <script>
 const token=new URLSearchParams(location.search).get("t")||"";
-let state=null,timer=null;
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let state=null,timer=null,editing=null;
+const PRESETS=[
+  {id:"custom",label:"自定义 / 中转站",protocol:"openai-chat",url:"",model:""},
+  {id:"openai",label:"OpenAI",protocol:"openai-chat",url:"https://api.openai.com/v1",model:"gpt-5",avatar:"oa"},
+  {id:"deepseek",label:"DeepSeek",protocol:"openai-chat",url:"https://api.deepseek.com",model:"deepseek-chat"},
+  {id:"xai",label:"xAI",protocol:"openai-chat",url:"https://api.x.ai/v1",model:"grok-4",avatar:"grok"},
+  {id:"kimi",label:"Kimi",protocol:"openai-chat",url:"https://api.moonshot.cn/v1",model:"kimi-k2-0905-preview"},
+  {id:"qwen",label:"通义千问",protocol:"openai-chat",url:"https://dashscope.aliyuncs.com/compatible-mode/v1",model:"qwen3-max"},
+  {id:"openrouter",label:"OpenRouter",protocol:"openai-chat",url:"https://openrouter.ai/api/v1",model:"openai/gpt-5"},
+  {id:"anthropic",label:"Anthropic",protocol:"anthropic-messages",url:"https://api.anthropic.com/v1",model:"claude-sonnet-4-5",avatar:"an"}
+];
+const DEFAULT_PATH={"openai-chat":"/chat/completions","openai-responses":"/responses","anthropic-messages":"/messages"};
+
 async function api(path,body){const r=await fetch(path,{method:body===undefined?"GET":"POST",headers:{"x-gs-token":token,"content-type":"application/json"},body:body===undefined?undefined:JSON.stringify(body)});const j=await r.json();if(!r.ok)throw new Error(j.error||r.statusText);return j;}
-function pill(text,cls){return '<span class="pill '+cls+'">'+esc(text)+'</span>'}
+function toast(text,cls){const el=document.createElement("div");el.className="toast "+(cls||"");el.textContent=text;$("#toasts").appendChild(el);setTimeout(()=>el.remove(),cls==="bad"?7000:3500);}
+function confirmDlg(title,body){return new Promise(res=>{$("#confirm-title").textContent=title;$("#confirm-body").textContent=body;const d=$("#dlg-confirm");const ok=$("#confirm-ok");const done=v=>{d.close();ok.onclick=null;res(v)};ok.onclick=()=>done(true);d.onclose=()=>res(false);d.showModal();});}
+function avatarFor(name,p){if(p&&p.authType==="codex")return{cls:"gpt",text:"AI"};const u=(p&&p.baseUrl||"").toLowerCase();if(u.includes("openai.com"))return{cls:"oa",text:"O"};if(u.includes("anthropic"))return{cls:"an",text:"A"};if(u.includes("x.ai"))return{cls:"grok",text:"X"};return{cls:"",text:name.slice(0,1).toUpperCase()};}
+function badgeProto(p){return p.protocol==="anthropic-messages"?"Anthropic":p.protocol==="openai-responses"?"Responses":"Chat"}
+
 function render(){
   $("#version").textContent="v"+state.version;
-  const h=state.host,s=[];
-  s.push(["主程序",h.exists?(h.patched?pill("已打补丁 "+h.patchVersion,"ok"):pill("未打补丁","warn")):pill("找不到（不在云端？）","bad")]);
-  if(h.process)s.push(["进程","pid "+h.process.pid+" · "+(h.runningCurrentBundle===true?pill("运行最新代码","ok"):h.runningCurrentBundle===false?pill("等待重启","warn"):"启动时间未知")]);else s.push(["进程",pill("未运行","warn")]);
-  s.push(["supervisor",(h.supervisor.busy?"有 Bot 在忙":"空闲")+(h.supervisor.pending?" · 有待处理的重启命令":"")]);
-  s.push(["当前走",state.route==="official"?"<b>官方 Grok</b>":state.route==="external"?"<b>"+esc(state.active)+"</b> — "+esc(state.providers[state.active]?.summary||""):pill("配置有误："+state.routeError,"bad")]);
-  $("#status").innerHTML=s.map(([k,v])=>"<dt>"+k+"</dt><dd>"+v+"</dd>").join("");
-  $("#btn-official").disabled=state.route==="official";
+  const h=state.host,sup=h.supervisor;
+  const route=state.route,active=state.active,ap=active?state.providers[active]:null;
+  const restartPending=h.runningCurrentBundle===false||!!sup.pending;
+  $("#status").innerHTML=
+    '<div class="now"><div class="label">当前对话使用</div><div class="value">'+
+    (route==="official"?'官方 Grok':route==="external"?esc(active)+' <span class="badge info">'+esc(ap?badgeProto(ap):"")+'</span>':'<span class="badge bad">配置有误</span>')+
+    (restartPending?' <span class="badge warn">等待主程序重启</span>':'')+'</div>'+
+    (route==="external"&&ap?'<div class="sub">'+esc(ap.summary)+'</div>':route==="error"?'<div class="sub">'+esc(state.routeError)+'</div>':'<div class="sub">选择下面任一来源后，下一条消息生效</div>')+'</div>'+
+    '<div class="dots">'+
+      '<span class="dot '+(h.exists?(h.patched?"ok":"warn"):"bad")+'">'+(h.exists?(h.patched?"补丁已就位":"未打补丁"):"未找到主程序")+'</span>'+
+      '<span class="dot '+(h.process?(h.runningCurrentBundle===false?"warn":"ok"):"warn")+'">'+(h.process?(h.runningCurrentBundle===false?"重启待执行":"主程序运行中"):"主程序未运行")+'</span>'+
+      '<span class="dot '+(sup.busy?"warn":"ok")+'">'+(sup.busy?"Bot 忙碌中":"空闲")+'</span>'+
+    '</div>';
   const names=Object.keys(state.providers);
-  $("#providers").innerHTML=names.length?names.map(n=>{const p=state.providers[n],active=state.active===n;return '<div class="provider"><div class="grow"><div class="name">'+esc(n)+(active?' '+pill("使用中","ok"):"")+(p.valid?"":' '+pill("配置无效","bad"))+'</div><div class="summary">'+esc(p.summary)+(p.authType==="codex"?" · ChatGPT 登录":p.hasKey?" · 已有 key":"")+'</div></div>'+(active?"":'<button class="primary" onclick="useProvider(\''+n+'\')">使用</button>')+'<button onclick="testProvider(\''+n+'\')">测试</button><button onclick="editProvider(\''+n+'\')">编辑</button><button class="danger" onclick="removeProvider(\''+n+'\')"'+(active?" disabled":"")+'>删除</button></div>'}).join(""):'<p class="sub" style="margin:0">还没有供应商，在下面添加一个。</p>';
-  const c=state.codex,job=c.jobs["codex-login"],inst=c.jobs["codex-install"];let html="";
-  if(!c.installed){html+='<div class="row">'+pill("云端未安装 Codex CLI","warn")+'<button onclick="act(\'/api/codex/install\')"'+(inst&&inst.status==="running"?" disabled":"")+'>'+(inst&&inst.status==="running"?"安装中…":"安装 Codex CLI")+'</button></div>';if(inst&&inst.output)html+='<pre>'+esc(inst.output)+'</pre>';if(inst&&inst.status==="failed")html+='<div class="msg bad">'+esc(inst.error)+'</div>';}
-  else{html+='<div class="row">'+(c.loggedIn?pill("已登录 ChatGPT（账号 "+c.account+"）","ok"):pill("未登录","warn"))+'</div>';
-    html+='<div class="grid2" style="margin-top:12px"><div class="field"><label>保存为供应商名</label><input id="codex-name" value="chatgpt"></div><div class="field"><label>模型</label><input id="codex-model" value="'+esc(c.defaultModel||"gpt-5.4")+'"></div></div>';
-    if(job&&job.status==="running"){html+='<div class="row"><b>1.</b> 在你自己的手机或电脑浏览器打开 '+(job.url?'<a href="'+esc(job.url)+'" target="_blank">'+esc(job.url)+'</a>':"…")+'</div><div class="row" style="margin-top:8px"><b>2.</b> 输入验证码：<span class="code">'+esc(job.code||"获取中…")+'</span></div><div class="row" style="margin-top:8px"><small>登录完成后这里会自动更新。</small><button onclick="act(\'/api/codex/cancel\')">取消</button></div>';}
-    else{html+='<div class="row"><button class="primary" onclick="codexLogin()">'+(c.loggedIn?"重新登录 / 保存为供应商":"登录 ChatGPT")+'</button></div>';if(job&&job.status==="done")html+='<div class="msg ok">登录成功，已保存供应商。'+(job.error?" "+esc(job.error):"")+'</div>';if(job&&job.status==="failed")html+='<div class="msg bad">'+esc(job.error||"登录失败")+'</div>';}
-  }
-  $("#codex").innerHTML=html;
+  $("#count").textContent=names.length?names.length+" 个自定义来源":"";
+  let html='<div class="card'+(route==="official"?" active":"")+'"><div class="card-row"><div class="avatar grok">G</div><div class="card-main"><div class="title"><h3>官方 Grok</h3><span class="badge">原厂通道</span>'+(route==="official"?'<span class="badge ok">使用中</span>':"")+'</div><div class="endpoint">Grok Bot 原生推理，走你的 Grok 额度</div></div><div class="actions">'+(route==="official"?"":'<button class="btn primary" data-act="official">使用</button>')+'</div></div></div>';
+  if(names.length===0)html+='<div class="empty">还没有自定义模型来源。点下方"添加模型来源"，或在右侧 ChatGPT 卡片登录。</div>';
+  for(const n of names){const p=state.providers[n],isActive=active===n,av=avatarFor(n,p);
+    html+='<div class="card'+(isActive?" active":"")+'"><div class="card-row"><div class="avatar '+av.cls+'">'+esc(av.text)+'</div><div class="card-main"><div class="title"><h3>'+esc(n)+'</h3><span class="badge">'+esc(badgeProto(p))+'</span>'+(isActive?'<span class="badge ok">使用中</span>':"")+(p.valid?"":'<span class="badge bad">配置无效</span>')+'</div>'+
+    '<div class="endpoint">'+esc(p.valid?"POST "+p.summary.split(" ")[1]:p.summary)+'</div><div class="meta"><span>'+esc(p.model||"")+'</span><span>'+(p.authType==="codex"?"ChatGPT 登录":p.authType==="none"?"无需密钥":p.hasKey?"已保存密钥":"未填密钥")+'</span></div></div>'+
+    '<div class="actions">'+(isActive?"":'<button class="btn primary" data-act="use" data-n="'+esc(n)+'">使用</button>')+'<button class="btn ghost" data-act="test" data-n="'+esc(n)+'">测试</button><button class="btn ghost" data-act="edit" data-n="'+esc(n)+'">编辑</button><button class="btn ghost danger" data-act="remove" data-n="'+esc(n)+'"'+(isActive?" disabled":"")+'>删除</button></div></div></div>';}
+  $("#list").innerHTML=html;
+
+  const c=state.codex,job=c.jobs["codex-login"],inst=c.jobs["codex-install"];let cx='<div class="card-row"><div class="avatar gpt">AI</div><div class="card-main"><div class="title"><h3>用 ChatGPT Plus / Pro 额度</h3>'+(c.installed?(c.loggedIn?'<span class="badge ok">已登录</span>':'<span class="badge">未登录</span>'):'<span class="badge warn">未安装 Codex CLI</span>')+'</div>';
+  cx+='<div class="meta" style="margin-top:6px"><span>不需要 API key，登录在你自己的设备上完成。OpenAI 条款上属擦边行为，账号有被限风险。</span></div>';
+  if(!c.installed){cx+=(inst&&inst.status==="failed"?'<div class="form-msg bad">'+esc(inst.error)+'</div>':"")+(inst&&inst.output?'<pre class="log">'+esc(inst.output)+'</pre>':"");}
+  else if(job&&job.status==="running"){cx+='<ol class="steps"><li>在你自己的手机或电脑浏览器打开 '+(job.url?'<b>'+esc(job.url)+'</b>':"…")+'</li><li>输入验证码 <span class="code">'+esc(job.code||"获取中…")+'</span></li><li>登录完成后这里会自动更新</li></ol>';}
+  else{cx+='<div class="grid2" style="margin-top:10px"><div class="field" style="margin:0"><label>保存为来源名</label><input id="codex-name" value="chatgpt"></div><div class="field" style="margin:0"><label>模型</label><input id="codex-model" value="'+esc(c.defaultModel||"gpt-5.4")+'"></div></div>'+(job&&job.status==="done"?'<div class="form-msg ok">登录成功，已保存来源。'+esc(job.error||"")+'</div>':job&&job.status==="failed"?'<div class="form-msg bad">'+esc(job.error||"登录失败")+'</div>':"");}
+  cx+='</div><div class="actions">'+(!c.installed?'<button class="btn primary" data-act="codex-install"'+(inst&&inst.status==="running"?" disabled":"")+'>'+(inst&&inst.status==="running"?"安装中…":"安装 Codex CLI")+'</button>':job&&job.status==="running"?'<button class="btn" data-act="codex-cancel">取消</button>':'<button class="btn primary" data-act="codex-login">'+(c.loggedIn?"重新登录并保存":"登录 ChatGPT")+'</button>')+'</div></div>';
+  $("#codex").innerHTML=cx;
+
   const u=state.usage,un=Object.keys(u);
-  $("#usage").innerHTML=un.length?'<table><tr><th>供应商</th><th>请求</th><th>失败</th><th>输入 token</th><th>输出 token</th><th>最近</th></tr>'+un.map(n=>'<tr><td>'+esc(n)+'</td><td>'+u[n].requests+'</td><td>'+u[n].failed+'</td><td>'+u[n].promptTokens.toLocaleString()+'</td><td>'+u[n].completionTokens.toLocaleString()+'</td><td>'+esc((u[n].lastUsedAt||"").replace("T"," ").slice(0,19))+'</td></tr>').join("")+'</table>':'<p class="sub" style="margin:0">还没有外部请求。</p>';
-  const rec=$("#recent");if(state.recent.length){rec.style.display="block";rec.textContent=state.recent.map(e=>e.raw||[(e.ts||"").slice(11,19),e.provider,e.model,e.kind,"HTTP "+e.status,(e.ms||0)+"ms",e.usage?e.usage.promptTokens+"+"+e.usage.completionTokens:"",e.error?"ERROR "+e.error:""].filter(Boolean).join("  ")).join("\n");}else rec.style.display="none";
-  const running=Object.values(c.jobs).some(j=>j.status==="running")||state.host.runningCurrentBundle===false;
+  $("#usage").innerHTML=(un.length?'<table class="usage"><tr><th>来源</th><th>请求</th><th>失败</th><th>输入 token</th><th>输出 token</th></tr>'+un.map(n=>'<tr><td>'+esc(n)+'</td><td>'+u[n].requests+'</td><td>'+u[n].failed+'</td><td>'+u[n].promptTokens.toLocaleString()+'</td><td>'+u[n].completionTokens.toLocaleString()+'</td></tr>').join("")+'</table>':'<div style="color:var(--muted);font-size:13px">还没有外部请求。</div>')+
+    (state.recent.length?'<pre class="log">'+esc(state.recent.map(e=>e.raw||[(e.ts||"").slice(11,19),e.provider||"-",e.model||"-",e.kind||"-","HTTP "+e.status,(e.ms||0)+"ms",e.usage?e.usage.promptTokens+"+"+e.usage.completionTokens:"",e.error?"ERROR "+e.error:""].filter(Boolean).join("  ")).join("\n"))+'</pre>':"");
+
+  $("#host").innerHTML='<div class="meta" style="margin:0 0 10px;display:grid;grid-template-columns:auto 1fr;gap:4px 12px"><span>主程序</span><span>'+esc(h.path)+(h.version?" · "+esc(h.version):"")+' · '+(h.patched?"已打补丁 "+esc(h.patchVersion):"未打补丁")+'</span><span>进程</span><span>'+(h.process?"pid "+h.process.pid+(h.process.startedAtMs?" · 启动于 "+new Date(h.process.startedAtMs).toLocaleString():""):"未运行")+'</span><span>supervisor</span><span>'+(sup.busy?"有 Bot 在忙":"空闲")+(sup.pending?" · 待处理命令 "+esc(sup.pending.id):"")+'</span><span>配置文件</span><span>'+esc(state.configPath)+'</span></div><div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button class="btn" data-act="restart">请求重启主程序</button><button class="btn danger" data-act="restore">卸载补丁并恢复原厂</button></div>';
+
+  const running=Object.values(c.jobs).some(j=>j.status==="running")||restartPending;
   clearTimeout(timer);timer=setTimeout(refresh,running?2000:15000);
 }
-async function refresh(){try{state=await api("/api/state");render();}catch(e){$("#status-msg").className="msg bad";$("#status-msg").textContent=e.message;}}
-function show(id,text,ok){const el=$(id);el.className="msg "+(ok?"ok":"bad");el.textContent=text;}
-async function act(path,body){try{const r=await api(path,body||{});if(r.state){state=r.state;render();}if(r.lines)show("#status-msg",r.lines.join(" "),true);}catch(e){show("#status-msg",e.message,false);}}
-async function useProvider(n){try{const r=await api("/api/use",{name:n});state=r.state;render();show("#providers-msg",r.lines.join(" "),true);}catch(e){show("#providers-msg",e.message,false);}}
-async function testProvider(n){show("#providers-msg","正在向 "+n+" 发测试请求…",true);try{const r=await api("/api/test",{name:n});show("#providers-msg",r.probe.ok?"OK，"+r.probe.ms+"ms，回复 "+JSON.stringify(r.probe.text):"失败："+r.probe.error,r.probe.ok);await refresh();}catch(e){show("#providers-msg",e.message,false);}}
-async function removeProvider(n){if(!confirm("删除供应商 "+n+"？"))return;try{const r=await api("/api/providers/delete",{name:n});state=r.state;render();show("#providers-msg",r.lines.join(" "),true);}catch(e){show("#providers-msg",e.message,false);}}
-function editProvider(n){const p=state.providers[n],f=$("#form");f.name.value=n;f.protocol.value=p.protocol||"openai-chat";f.baseUrl.value=p.baseUrl||"";f.model.value=p.model||"";f.apiKey.value="";f.authType.value=p.authType||"";f.endpointPath.value=p.endpointPath||"";f.reasoning.value=p.parameters?.reasoningEffort||"";f.maxTokens.value=p.parameters?.maxTokens||"";f.headers.value=p.headers?Object.entries(p.headers).map(([k,v])=>k+": "+v).join("\n"):"";protocolChanged();f.scrollIntoView({behavior:"smooth"});}
-function protocolChanged(){const f=$("#form"),d={"openai-chat":"/chat/completions","openai-responses":"/responses","anthropic-messages":"/messages"}[f.protocol.value];$("#url-hint").textContent="实际请求 = 根地址 + "+d+"，例如 https://api.example.com/v1 → https://api.example.com/v1"+d;}
-async function saveProvider(ev){ev.preventDefault();const f=ev.target,btn=$("#btn-save");btn.disabled=true;show("#form-msg","保存中，并向它发一条测试请求…",true);
-  const body={name:f.name.value.trim(),protocol:f.protocol.value,baseUrl:f.baseUrl.value.trim(),model:f.model.value.trim(),apiKey:f.apiKey.value,authType:f.authType.value,endpointPath:f.endpointPath.value.trim(),reasoning:f.reasoning.value.trim(),maxTokens:f.maxTokens.value,headers:f.headers.value.split("\n").map(s=>s.trim()).filter(Boolean)};
-  try{const r=await api("/api/providers",body);state=r.state;render();if(r.probe&&!r.probe.ok){show("#form-msg","已保存，但测试请求失败："+r.probe.error+"。请检查地址、key、模型。",false);}else{show("#form-msg","已保存，测试通过（"+r.probe.ms+"ms，回复 "+JSON.stringify(r.probe.text)+"）。",true);if(f.useNow.checked)await useProvider(body.name);f.apiKey.value="";}}
-  catch(e){show("#form-msg",e.message,false);}finally{btn.disabled=false;}}
-async function codexLogin(){try{const r=await api("/api/codex/login",{name:$("#codex-name").value.trim()||"chatgpt",model:$("#codex-model").value.trim()});state=r.state;render();}catch(e){show("#status-msg",e.message,false);}}
-protocolChanged();refresh();
+let firstRender=true;
+async function refresh(){try{state=await api("/api/state");render();if(firstRender){firstRender=false;if(location.hash==="#add")openForm(null);}}catch(e){toast(e.message,"bad");}}
+function apply(r){if(r.state){state=r.state;render();}}
+
+async function act(action,name){
+  try{
+    if(action==="use"){const r=await api("/api/use",{name});apply(r);toast(r.lines[0]+(r.lines.some(l=>/restart requested/.test(l))?"；主程序将在空闲时重启一次":""),"ok");}
+    else if(action==="official"){apply(await api("/api/official",{}));toast("已切回官方 Grok，下一条消息生效","ok");}
+    else if(action==="test"){toast("正在向 "+name+" 发测试请求…");const r=await api("/api/test",{name});toast(r.probe.ok?name+" 正常，"+r.probe.ms+"ms，回复 "+JSON.stringify(r.probe.text):name+" 失败："+r.probe.error,r.probe.ok?"ok":"bad");refresh();}
+    else if(action==="remove"){if(!await confirmDlg("删除来源 "+name,"只删除这条配置，不影响其它来源。"))return;apply(await api("/api/providers/delete",{name}));toast("已删除 "+name,"ok");}
+    else if(action==="edit"){openForm(name);}
+    else if(action==="restart"){const r=await api("/api/restart",{});apply(r);toast(r.lines.join(" "),"ok");}
+    else if(action==="restore"){if(!await confirmDlg("卸载补丁","主程序恢复为原厂文件并重启一次；已保存的来源配置不会删除。"))return;const r=await api("/api/restore",{});apply(r);toast(r.lines.join(" "),"ok");}
+    else if(action==="codex-install"){apply(await api("/api/codex/install",{}));}
+    else if(action==="codex-login"){apply(await api("/api/codex/login",{name:($("#codex-name")||{}).value||"chatgpt",model:($("#codex-model")||{}).value||""}));}
+    else if(action==="codex-cancel"){apply(await api("/api/codex/cancel",{}));}
+  }catch(e){toast(e.message,"bad");}
+}
+
+/* form */
+function setPreset(id){const f=$("#form"),p=PRESETS.find(x=>x.id===id);document.querySelectorAll(".preset").forEach(b=>b.classList.toggle("on",b.dataset.id===id));if(!p)return;f.protocol.value=p.protocol;if(p.url)f.baseUrl.value=p.url;if(p.model)f.model.value=p.model;if(!f.name.value&&id!=="custom")f.name.value=id;urlHint();}
+function urlHint(){const f=$("#form");$("#url-hint").textContent="实际请求："+(f.baseUrl.value.trim()||"https://api.example.com/v1").replace(/\/+$/,"")+(f.endpointPath.value.trim()||DEFAULT_PATH[f.protocol.value]);}
+function openForm(name){const f=$("#form");f.reset();editing=name||null;$("#dlg-title").textContent=name?"编辑 "+name:"添加模型来源";$("#form-msg").textContent="";$("#key-note").textContent=name?"（留空 = 不改）":"";
+  if(name){const p=state.providers[name];f.name.value=name;f.protocol.value=p.protocol||"openai-chat";f.baseUrl.value=p.baseUrl||"";f.model.value=p.model||"";f.authType.value=p.authType&&p.authType!=="codex"?p.authType:"";f.endpointPath.value=p.endpointPath||"";f.reasoning.value=p.parameters?.reasoningEffort||"";f.maxTokens.value=p.parameters?.maxTokens||"";f.headers.value=p.headers?Object.entries(p.headers).map(([k,v])=>k+": "+v).join("\n"):"";document.querySelectorAll(".preset").forEach(b=>b.classList.remove("on"));}
+  else setPreset("custom");
+  f.name.readOnly=!!name;urlHint();$("#dlg-provider").showModal();}
+async function save(useAfter){const f=$("#form");if(!f.reportValidity())return;const body={name:f.name.value.trim(),protocol:f.protocol.value,baseUrl:f.baseUrl.value.trim(),model:f.model.value.trim(),apiKey:f.apiKey.value,authType:f.authType.value,endpointPath:f.endpointPath.value.trim(),reasoning:f.reasoning.value.trim(),maxTokens:f.maxTokens.value,headers:f.headers.value.split("\n").map(s=>s.trim()).filter(Boolean)};
+  const btns=[$("#btn-save-only"),$("#btn-save-use")];btns.forEach(b=>b.disabled=true);const msg=$("#form-msg");msg.className="form-msg";msg.textContent="正在保存并向它发一条测试请求…";
+  try{const r=await api("/api/providers",body);apply(r);if(r.probe&&!r.probe.ok){msg.className="form-msg bad";msg.textContent="已保存，但测试请求失败："+r.probe.error;return;}
+    $("#dlg-provider").close();toast(body.name+" 测试通过（"+r.probe.ms+"ms）","ok");if(useAfter)await act("use",body.name);}
+  catch(e){msg.className="form-msg bad";msg.textContent=e.message;}finally{btns.forEach(b=>b.disabled=false);}}
+
+/* wiring */
+document.addEventListener("click",e=>{const t=e.target.closest("[data-act]");if(t){act(t.dataset.act,t.dataset.n);return;}if(e.target.closest("[data-close]")){e.target.closest("dialog").close();}});
+$("#fab").addEventListener("click",()=>openForm(null));
+$("#btn-refresh").addEventListener("click",refresh);
+$("#btn-help").addEventListener("click",()=>$("#dlg-help").showModal());
+$("#btn-save-only").addEventListener("click",()=>save(false));
+$("#btn-save-use").addEventListener("click",()=>save(true));
+$("#presets").innerHTML=PRESETS.map(p=>'<button type="button" class="preset" data-id="'+p.id+'">'+esc(p.label)+'</button>').join("");
+$("#presets").addEventListener("click",e=>{const b=e.target.closest(".preset");if(b)setPreset(b.dataset.id);});
+$("#form").addEventListener("input",urlHint);$("#form").addEventListener("change",urlHint);
+$("#form").addEventListener("submit",e=>{e.preventDefault();save(true);});
+refresh();
 </script>
 </body></html>`;
 // grok-switch command line. build.mjs appends this after the injectable
@@ -4852,7 +5004,7 @@ var cliFs = require("node:fs");
 var cliPath = require("node:path");
 var cliChildProcess = require("node:child_process");
 
-var CLI_VERSION = "0.6.7";
+var CLI_VERSION = "0.7.0";
 var CLI_HOST_PATH = process.env.GROK_SWITCH_HOST || "/home/box/sand-host/host-main.cjs";
 var CLI_HOST_VERSION_PATH = cliPath.join(cliPath.dirname(CLI_HOST_PATH), "version");
 var CLI_BACKUP_PATH = CLI_HOST_PATH + ".grok-switch.orig";
