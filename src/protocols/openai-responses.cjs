@@ -383,14 +383,10 @@ function createResponsesState(requestId) {
   };
 }
 
+// The JSON `type` is authoritative; relays are inconsistent about the SSE
+// `event:` line, so a mismatch is not an error.
 function eventType(raw, payload) {
   if (payload != null && typeof payload.type === "string" && payload.type.length > 0) {
-    if (raw.event !== "message" && raw.event !== payload.type) {
-      throw contract.protocolError("OpenAI Responses SSE event type mismatch", {
-        protocol: PROTOCOL_ID,
-        code: "invalid-json"
-      });
-    }
     return payload.type;
   }
   return raw.event;
@@ -443,7 +439,11 @@ function handleOutputItem(state, item, outputIndex, events, finalize) {
       events.push({ type: "reasoning", textDelta: summaryText });
       current.reasoningEmitted = true;
     }
-    events.push(contract.providerStateEvent(PROTOCOL_ID, [validateResponsesReasoningItem(item)]));
+    // Relays often strip encrypted_content. Without it the reasoning simply
+    // is not replayed on the next turn; that is not a failure.
+    if (typeof item.encrypted_content === "string" && item.encrypted_content.length > 0) {
+      events.push(contract.providerStateEvent(PROTOCOL_ID, [validateResponsesReasoningItem(item)]));
+    }
     return;
   }
   throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses output item is unrepresentable");
@@ -482,23 +482,23 @@ function errorMessageFrom(payload, fallback) {
 function handlePayload(raw, payload, state) {
   var type = eventType(raw, payload);
   var events = [];
-  if (type === "ping" || type === "response.created" || type === "response.in_progress") {
+  if (type === "ping" || type === "response.created" || type === "response.in_progress" || type === "response.queued") {
     if (payload.response != null) {
       state.observeResponse(payload.response);
     }
     return events;
   }
-  if (type === "response.failed") {
+  if (type === "response.failed" || type === "response.cancelled" || type === "response.canceled") {
     state.markFailed();
     if (payload.response != null) {
       state.observeResponse(payload.response);
     }
     throw contract.protocolError(
-      errorMessageFrom(payload, "OpenAI Responses stream failed"),
+      errorMessageFrom(payload, "OpenAI Responses stream " + (type === "response.failed" ? "failed" : "cancelled")),
       { protocol: PROTOCOL_ID, code: "stream-error" }
     );
   }
-  if (type === "error") {
+  if (type === "error" || type === "response.error") {
     throw contract.protocolError(
       errorMessageFrom(payload, "OpenAI Responses stream error"),
       { protocol: PROTOCOL_ID, code: "stream-error" }
@@ -577,7 +577,7 @@ function handlePayload(raw, payload, state) {
   if (type === "response.refusal.delta" || type === "response.refusal.done") {
     throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses refusal is unrepresentable");
   }
-  if (type === "response.completed") {
+  if (type === "response.completed" || type === "response.done") {
     if (payload.response != null) {
       state.observeResponse(payload.response);
     }
@@ -596,6 +596,13 @@ function handlePayload(raw, payload, state) {
       protocol: PROTOCOL_ID,
       code: "missing-terminator"
     });
+  }
+  // Informational events (reasoning_summary_part.*, *.done markers,
+  // annotations, hosted-tool progress, future additions) carry nothing the
+  // host needs; the content they describe arrives through the deltas and
+  // output items handled above.
+  if (typeof type === "string" && type.indexOf("response.") === 0) {
+    return events;
   }
   throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses event is unrepresentable");
 }

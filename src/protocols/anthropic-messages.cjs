@@ -467,6 +467,11 @@ function startBlock(state, payload, events) {
     state.maybeStart(current, events);
     return;
   }
+  if (block.type === "redacted_thinking") {
+    // Safety-redacted reasoning carries nothing displayable or replayable.
+    current.kind = "redacted";
+    return;
+  }
   throw tools.unsupported(PROTOCOL_ID, "Anthropic content block is unrepresentable");
 }
 
@@ -558,14 +563,15 @@ function handlePayload(raw, payload, state) {
     if (current.kind === "tool") {
       state.finalizeTool(current, events);
     } else if (current.kind === "reasoning") {
-      if (typeof current.signature !== "string" || current.signature.length === 0) {
-        throw tools.unsupported(PROTOCOL_ID, "Anthropic thinking block is missing a signature");
+      // Relays may strip the signature; then the thinking is shown but not
+      // replayed on the next turn (Anthropic rejects unsigned replays).
+      if (typeof current.signature === "string" && current.signature.length > 0) {
+        events.push(contract.providerStateEvent(PROTOCOL_ID, [{
+          type: "thinking",
+          thinking: current.thinking,
+          signature: current.signature
+        }]));
       }
-      events.push(contract.providerStateEvent(PROTOCOL_ID, [{
-        type: "thinking",
-        thinking: current.thinking,
-        signature: current.signature
-      }]));
     }
     return events;
   }
@@ -586,7 +592,9 @@ function handlePayload(raw, payload, state) {
     }
     return events;
   }
-  throw tools.unsupported(PROTOCOL_ID, "Anthropic event is unrepresentable");
+  // Unknown informational events are ignored; content only arrives through
+  // the block events handled above.
+  return events;
 }
 
 function createStreamDecoder(options) {

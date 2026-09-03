@@ -535,11 +535,43 @@ test("OpenAI Responses reasoning continuation emits and replays opaque provider 
     "unsupported-shape",
     "openai-responses"
   );
-  assertCode(
-    () => decode(adapter, fixture("streams/openai-responses/reasoning-unsigned.sse")),
-    "unsupported-shape",
-    "openai-responses"
-  );
+  // Relays that strip encrypted_content still stream fine; the reasoning is
+  // shown but not replayed (no provider-state event).
+  const unsigned = decode(adapter, fixture("streams/openai-responses/reasoning-unsigned.sse"));
+  assert.equal(semantics(unsigned).reasoning, "plan");
+  assert.equal(collectProviderState(unsigned), null);
+  assert.equal(unsigned.at(-1).type, "finish");
+});
+
+test("OpenAI Responses decoder ignores informational events and relay variants", () => {
+  const adapter = protocols.getAdapter("openai-responses");
+  const stream = [
+    { type: "response.queued", response: { id: "r1" } },
+    { type: "response.created", response: { id: "r1" } },
+    { type: "response.output_item.added", output_index: 0, item: { id: "rs_1", type: "reasoning" } },
+    { type: "response.reasoning_summary_part.added", output_index: 0, summary_index: 0, part: { type: "summary_text", text: "" } },
+    { type: "response.reasoning_summary_text.delta", output_index: 0, delta: "think" },
+    { type: "response.reasoning_summary_text.done", output_index: 0, text: "think" },
+    { type: "response.reasoning_summary_part.done", output_index: 0, part: { type: "summary_text", text: "think" } },
+    { type: "response.output_item.done", output_index: 0, item: { id: "rs_1", type: "reasoning", summary: [{ type: "summary_text", text: "think" }] } },
+    { type: "response.output_item.added", output_index: 1, item: { id: "msg_1", type: "message" } },
+    { type: "response.content_part.added", output_index: 1 },
+    { type: "response.output_text.delta", output_index: 1, delta: "hi" },
+    { type: "response.output_text.annotation.added", output_index: 1, annotation: { type: "url_citation" } },
+    { type: "response.output_text.done", output_index: 1, text: "hi" },
+    { type: "response.some_future_event", output_index: 1 },
+    { type: "response.done", response: { id: "r1", usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 } } }
+  ].map((e) => "event: message\ndata: " + JSON.stringify(e) + "\n\n").join("");
+  const events = decode(adapter, stream);
+  const summary = semantics(events);
+  assert.equal(summary.reasoning, "think");
+  assert.equal(summary.text, "hi");
+  assert.equal(events.at(-1).type, "finish");
+  assert.equal(events.at(-1).usage.promptTokens, 3);
+
+  assertCode(() => decode(adapter, "event: message\ndata: " + JSON.stringify({ type: "response.error", error: { message: "boom" } }) + "\n\n"), "stream-error", "openai-responses");
+  assertCode(() => decode(adapter, "event: message\ndata: " + JSON.stringify({ type: "response.cancelled", response: { id: "r" } }) + "\n\n"), "stream-error", "openai-responses");
+  assertCode(() => decode(adapter, "event: message\ndata: " + JSON.stringify({ type: "totally.unknown" }) + "\n\n"), "unsupported-shape", "openai-responses");
 });
 
 test("Anthropic thinking continuation emits and replays signed provider state", () => {
@@ -593,11 +625,24 @@ test("Anthropic thinking continuation emits and replays signed provider state", 
     "unsupported-shape",
     "anthropic-messages"
   );
-  assertCode(
-    () => decode(adapter, fixture("streams/anthropic-messages/thinking-unsigned.sse")),
-    "unsupported-shape",
-    "anthropic-messages"
-  );
+  // Unsigned thinking (relay stripped the signature) is shown, not replayed.
+  const unsigned = decode(adapter, fixture("streams/anthropic-messages/thinking-unsigned.sse"));
+  assert.equal(collectProviderState(unsigned), null);
+  assert.equal(unsigned.at(-1).type, "finish");
+
+  const tolerant = decode(adapter, [
+    "event: message_start\ndata: " + JSON.stringify({ type: "message_start", message: { id: "m", usage: { input_tokens: 1 } } }),
+    "event: content_block_start\ndata: " + JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "redacted_thinking", data: "opaque" } }),
+    "event: content_block_stop\ndata: " + JSON.stringify({ type: "content_block_stop", index: 0 }),
+    "event: some_new_event\ndata: " + JSON.stringify({ type: "some_new_event" }),
+    "event: content_block_start\ndata: " + JSON.stringify({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } }),
+    "event: content_block_delta\ndata: " + JSON.stringify({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "ok" } }),
+    "event: content_block_stop\ndata: " + JSON.stringify({ type: "content_block_stop", index: 1 }),
+    "event: message_delta\ndata: " + JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } }),
+    "event: message_stop\ndata: " + JSON.stringify({ type: "message_stop" })
+  ].join("\n\n") + "\n\n");
+  assert.equal(semantics(tolerant).text, "ok");
+  assert.equal(tolerant.at(-1).type, "finish");
 });
 
 test("providerState is bound to visible assistant reasoning", () => {

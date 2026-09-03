@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// grok-switch 0.6.3 - https://github.com/enderzcx/grok-bot-switch
+// grok-switch 0.6.4 - https://github.com/enderzcx/grok-bot-switch
 // Single-file build. Do not edit; regenerate with `node build.mjs`.
 "use strict";
 // GROK_SWITCH_PAYLOAD_BEGIN
@@ -2014,14 +2014,10 @@ function createResponsesState(requestId) {
   };
 }
 
+// The JSON `type` is authoritative; relays are inconsistent about the SSE
+// `event:` line, so a mismatch is not an error.
 function eventType(raw, payload) {
   if (payload != null && typeof payload.type === "string" && payload.type.length > 0) {
-    if (raw.event !== "message" && raw.event !== payload.type) {
-      throw contract.protocolError("OpenAI Responses SSE event type mismatch", {
-        protocol: PROTOCOL_ID,
-        code: "invalid-json"
-      });
-    }
     return payload.type;
   }
   return raw.event;
@@ -2074,7 +2070,11 @@ function handleOutputItem(state, item, outputIndex, events, finalize) {
       events.push({ type: "reasoning", textDelta: summaryText });
       current.reasoningEmitted = true;
     }
-    events.push(contract.providerStateEvent(PROTOCOL_ID, [validateResponsesReasoningItem(item)]));
+    // Relays often strip encrypted_content. Without it the reasoning simply
+    // is not replayed on the next turn; that is not a failure.
+    if (typeof item.encrypted_content === "string" && item.encrypted_content.length > 0) {
+      events.push(contract.providerStateEvent(PROTOCOL_ID, [validateResponsesReasoningItem(item)]));
+    }
     return;
   }
   throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses output item is unrepresentable");
@@ -2113,23 +2113,23 @@ function errorMessageFrom(payload, fallback) {
 function handlePayload(raw, payload, state) {
   var type = eventType(raw, payload);
   var events = [];
-  if (type === "ping" || type === "response.created" || type === "response.in_progress") {
+  if (type === "ping" || type === "response.created" || type === "response.in_progress" || type === "response.queued") {
     if (payload.response != null) {
       state.observeResponse(payload.response);
     }
     return events;
   }
-  if (type === "response.failed") {
+  if (type === "response.failed" || type === "response.cancelled" || type === "response.canceled") {
     state.markFailed();
     if (payload.response != null) {
       state.observeResponse(payload.response);
     }
     throw contract.protocolError(
-      errorMessageFrom(payload, "OpenAI Responses stream failed"),
+      errorMessageFrom(payload, "OpenAI Responses stream " + (type === "response.failed" ? "failed" : "cancelled")),
       { protocol: PROTOCOL_ID, code: "stream-error" }
     );
   }
-  if (type === "error") {
+  if (type === "error" || type === "response.error") {
     throw contract.protocolError(
       errorMessageFrom(payload, "OpenAI Responses stream error"),
       { protocol: PROTOCOL_ID, code: "stream-error" }
@@ -2208,7 +2208,7 @@ function handlePayload(raw, payload, state) {
   if (type === "response.refusal.delta" || type === "response.refusal.done") {
     throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses refusal is unrepresentable");
   }
-  if (type === "response.completed") {
+  if (type === "response.completed" || type === "response.done") {
     if (payload.response != null) {
       state.observeResponse(payload.response);
     }
@@ -2227,6 +2227,13 @@ function handlePayload(raw, payload, state) {
       protocol: PROTOCOL_ID,
       code: "missing-terminator"
     });
+  }
+  // Informational events (reasoning_summary_part.*, *.done markers,
+  // annotations, hosted-tool progress, future additions) carry nothing the
+  // host needs; the content they describe arrives through the deltas and
+  // output items handled above.
+  if (typeof type === "string" && type.indexOf("response.") === 0) {
+    return events;
   }
   throw tools.unsupported(PROTOCOL_ID, "OpenAI Responses event is unrepresentable");
 }
@@ -2785,6 +2792,11 @@ function startBlock(state, payload, events) {
     state.maybeStart(current, events);
     return;
   }
+  if (block.type === "redacted_thinking") {
+    // Safety-redacted reasoning carries nothing displayable or replayable.
+    current.kind = "redacted";
+    return;
+  }
   throw tools.unsupported(PROTOCOL_ID, "Anthropic content block is unrepresentable");
 }
 
@@ -2876,14 +2888,15 @@ function handlePayload(raw, payload, state) {
     if (current.kind === "tool") {
       state.finalizeTool(current, events);
     } else if (current.kind === "reasoning") {
-      if (typeof current.signature !== "string" || current.signature.length === 0) {
-        throw tools.unsupported(PROTOCOL_ID, "Anthropic thinking block is missing a signature");
+      // Relays may strip the signature; then the thinking is shown but not
+      // replayed on the next turn (Anthropic rejects unsigned replays).
+      if (typeof current.signature === "string" && current.signature.length > 0) {
+        events.push(contract.providerStateEvent(PROTOCOL_ID, [{
+          type: "thinking",
+          thinking: current.thinking,
+          signature: current.signature
+        }]));
       }
-      events.push(contract.providerStateEvent(PROTOCOL_ID, [{
-        type: "thinking",
-        thinking: current.thinking,
-        signature: current.signature
-      }]));
     }
     return events;
   }
@@ -2904,7 +2917,9 @@ function handlePayload(raw, payload, state) {
     }
     return events;
   }
-  throw tools.unsupported(PROTOCOL_ID, "Anthropic event is unrepresentable");
+  // Unknown informational events are ignored; content only arrives through
+  // the block events handled above.
+  return events;
 }
 
 function createStreamDecoder(options) {
@@ -4610,7 +4625,7 @@ var cliFs = require("node:fs");
 var cliPath = require("node:path");
 var cliChildProcess = require("node:child_process");
 
-var CLI_VERSION = "0.6.3";
+var CLI_VERSION = "0.6.4";
 var CLI_HOST_PATH = process.env.GROK_SWITCH_HOST || "/home/box/sand-host/host-main.cjs";
 var CLI_HOST_VERSION_PATH = cliPath.join(cliPath.dirname(CLI_HOST_PATH), "version");
 var CLI_BACKUP_PATH = CLI_HOST_PATH + ".grok-switch.orig";
