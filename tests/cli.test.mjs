@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = path.join(root, "dist", "grok-switch.cjs");
+const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
 const REAL_BUNDLE = process.env.GROK_SWITCH_REAL_BUNDLE || path.join(root, "..", "grok_home", "research", "current-0.30", "host-main.cjs");
 
 // Mirrors the shape of the real bundle around the anchors we rely on.
@@ -328,7 +329,7 @@ test("ui panel: token-gated API drives save, probe, use, official and stop", asy
     const tok = url.slice(url.indexOf("t=") + 2);
     const state = JSON.parse(fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "ui.json"), "utf8"));
     assert.equal(state.url, url);
-    assert.equal(state.version, "0.6.5");
+    assert.equal(state.version, PKG_VERSION);
 
     const page = await fetch(base + "/");
     assert.equal(page.status, 200);
@@ -371,9 +372,9 @@ test("ui panel: token-gated API drives save, probe, use, official and stop", asy
     stale.version = "0.6.1";
     fs.writeFileSync(path.join(env.GROK_SWITCH_DIR, "ui.json"), JSON.stringify(stale));
     r = await runAsync(env, "ui", "--background", "--port", String(stale.port));
-    assert.match(r.out, /replacing stale panel version 0\.6\.1 with 0\.6\.5/);
+    assert.match(r.out, new RegExp("replacing stale panel version 0\\.6\\.1 with " + PKG_VERSION.replace(/\./g, "\\.")));
     const replaced = JSON.parse(fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "ui.json"), "utf8"));
-    assert.equal(replaced.version, "0.6.5");
+    assert.equal(replaced.version, PKG_VERSION);
     assert.notEqual(replaced.pid, stale.pid);
     r = await runAsync(env, "ui", "stop");
     assert.match(r.out, /panel stopped/);

@@ -10,6 +10,6 @@
   "scripts": {
     "build": "node build.mjs",
     "build:minitool": "cd minitool && rm -f ../dist/grok-switch-minitool.zip && zip -q -r -X ../dist/grok-switch-minitool.zip . -x '*.DS_Store'",
-    "test": "node build.mjs && node --test tests/*.test.mjs"
+    "test": "node build.mjs && node --test --test-reporter=spec tests/*.test.mjs"
   }
 }
