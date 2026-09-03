@@ -8,6 +8,7 @@ var uiChild = require("node:child_process");
 
 var UI_DEFAULT_PORT = 18990;
 var UI_STATE_PATH = GROK_SWITCH_DIR + "/ui.json";
+var UI_TOKEN_PATH = GROK_SWITCH_DIR + "/panel-token";
 var UI_LOG_PATH = GROK_SWITCH_DIR + "/ui.log";
 var UI_JOB_MAX_OUTPUT = 20000;
 
@@ -267,8 +268,25 @@ function uiReadState() {
   }
 }
 
-function uiServe(port) {
+// The token is created once per installation and kept in the config dir, so
+// the panel URL a user has open (or bookmarked in the cloud browser) survives
+// panel restarts and upgrades. `ui --new-token` rotates it.
+function uiToken(rotate) {
+  var path = UI_TOKEN_PATH;
+  if (!rotate) {
+    try {
+      var existing = cliFs.readFileSync(path, "utf8").trim();
+      if (/^[a-f0-9]{32}$/.test(existing)) return existing;
+    } catch (_error) {}
+  }
   var token = uiCrypto.randomBytes(16).toString("hex");
+  cliFs.mkdirSync(CLI_CONFIG_DIR, { recursive: true, mode: 448 });
+  cliFs.writeFileSync(path, token + "\n", { mode: 384 });
+  return token;
+}
+
+function uiServe(port, rotateToken) {
+  var token = uiToken(rotateToken === true);
   var server = uiCreateServer(token);
   return new Promise(function (resolve, reject) {
     server.on("error", reject);
@@ -324,7 +342,7 @@ async function uiCommand(args) {
   if (args.flags.background) {
     cliFs.mkdirSync(CLI_CONFIG_DIR, { recursive: true, mode: 448 });
     var log = cliFs.openSync(UI_LOG_PATH, "a", 384);
-    var child = uiChild.spawn(process.execPath, [__filename, "ui", "--port", String(port)], { detached: true, stdio: ["ignore", log, log], env: process.env });
+    var child = uiChild.spawn(process.execPath, [__filename, "ui", "--port", String(port)].concat(args.flags["new-token"] ? ["--new-token"] : []), { detached: true, stdio: ["ignore", log, log], env: process.env });
     child.unref();
     for (var i = 0; i < 50; i += 1) {
       await new Promise(function (resolve) {
@@ -339,7 +357,7 @@ async function uiCommand(args) {
     }
     throw new CliError("panel did not start; see " + UI_LOG_PATH);
   }
-  var served = await uiServe(port);
+  var served = await uiServe(port, args.flags["new-token"] === true);
   cliPrint("panel running: " + served.url);
   cliPrint("open this URL in the browser on the cloud machine (not on your own computer). Ctrl+C stops it.");
   var stop = function () {

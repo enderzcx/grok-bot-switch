@@ -382,6 +382,15 @@ test("ui panel: token-gated API drives save, probe, use, official and stop", asy
     await assert.rejects(fetch(base + "/"));
     r = await runAsync(env, "ui", "status");
     assert.match(r.out, /not running/);
+
+    // The token is per installation: a restarted panel keeps the same URL token.
+    r = await runAsync(env, "ui", "--background", "--port", "0");
+    const again = /\?t=([a-f0-9]{32})/.exec(r.out)[1];
+    assert.equal(again, tok, "token survives restarts");
+    await runAsync(env, "ui", "stop");
+    r = await runAsync(env, "ui", "--background", "--port", "0", "--new-token");
+    assert.notEqual(/\?t=([a-f0-9]{32})/.exec(r.out)[1], tok, "--new-token rotates it");
+    await runAsync(env, "ui", "stop");
   } finally {
     server.close();
     try {

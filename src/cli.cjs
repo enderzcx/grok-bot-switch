@@ -40,7 +40,7 @@ var CLI_USAGE = [
   "  log [N]                         show the last N upstream requests (default 20)",
   "  restart                         ask the supervisor to restart the host when idle",
   "  restore                         remove the patch from the host bundle and restart",
-  "  ui [--background] [--port N]    web panel on 127.0.0.1 for configuring providers (ui stop / ui status)",
+  "  ui [--background] [--port N]    web panel on 127.0.0.1 for configuring providers (ui stop / ui status / ui --new-token)",
   "",
   "provider options:",
   "  --url <baseUrl>                 e.g. https://api.openai.com/v1 (required)",
@@ -78,7 +78,7 @@ function cliParseArgs(argv) {
     var value;
     if (eq !== -1) {
       value = arg.slice(eq + 1);
-    } else if (name === "json" || name === "force" || name === "no-test" || name === "background" || name === "no-ui") {
+    } else if (name === "json" || name === "force" || name === "no-test" || name === "background" || name === "no-ui" || name === "new-token") {
       value = true;
     } else {
       if (i + 1 >= argv.length) throw new CliError("--" + name + " needs a value");

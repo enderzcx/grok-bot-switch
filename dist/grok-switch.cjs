@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// grok-switch 0.8.0 - https://github.com/enderzcx/grok-bot-switch
+// grok-switch 0.8.1 - https://github.com/enderzcx/grok-bot-switch
 // Single-file build. Do not edit; regenerate with `node build.mjs`.
 "use strict";
 // GROK_SWITCH_PAYLOAD_BEGIN
@@ -4435,6 +4435,7 @@ var uiChild = require("node:child_process");
 
 var UI_DEFAULT_PORT = 18990;
 var UI_STATE_PATH = GROK_SWITCH_DIR + "/ui.json";
+var UI_TOKEN_PATH = GROK_SWITCH_DIR + "/panel-token";
 var UI_LOG_PATH = GROK_SWITCH_DIR + "/ui.log";
 var UI_JOB_MAX_OUTPUT = 20000;
 
@@ -4694,8 +4695,25 @@ function uiReadState() {
   }
 }
 
-function uiServe(port) {
+// The token is created once per installation and kept in the config dir, so
+// the panel URL a user has open (or bookmarked in the cloud browser) survives
+// panel restarts and upgrades. `ui --new-token` rotates it.
+function uiToken(rotate) {
+  var path = UI_TOKEN_PATH;
+  if (!rotate) {
+    try {
+      var existing = cliFs.readFileSync(path, "utf8").trim();
+      if (/^[a-f0-9]{32}$/.test(existing)) return existing;
+    } catch (_error) {}
+  }
   var token = uiCrypto.randomBytes(16).toString("hex");
+  cliFs.mkdirSync(CLI_CONFIG_DIR, { recursive: true, mode: 448 });
+  cliFs.writeFileSync(path, token + "\n", { mode: 384 });
+  return token;
+}
+
+function uiServe(port, rotateToken) {
+  var token = uiToken(rotateToken === true);
   var server = uiCreateServer(token);
   return new Promise(function (resolve, reject) {
     server.on("error", reject);
@@ -4751,7 +4769,7 @@ async function uiCommand(args) {
   if (args.flags.background) {
     cliFs.mkdirSync(CLI_CONFIG_DIR, { recursive: true, mode: 448 });
     var log = cliFs.openSync(UI_LOG_PATH, "a", 384);
-    var child = uiChild.spawn(process.execPath, [__filename, "ui", "--port", String(port)], { detached: true, stdio: ["ignore", log, log], env: process.env });
+    var child = uiChild.spawn(process.execPath, [__filename, "ui", "--port", String(port)].concat(args.flags["new-token"] ? ["--new-token"] : []), { detached: true, stdio: ["ignore", log, log], env: process.env });
     child.unref();
     for (var i = 0; i < 50; i += 1) {
       await new Promise(function (resolve) {
@@ -4766,7 +4784,7 @@ async function uiCommand(args) {
     }
     throw new CliError("panel did not start; see " + UI_LOG_PATH);
   }
-  var served = await uiServe(port);
+  var served = await uiServe(port, args.flags["new-token"] === true);
   cliPrint("panel running: " + served.url);
   cliPrint("open this URL in the browser on the cloud machine (not on your own computer). Ctrl+C stops it.");
   var stop = function () {
@@ -4790,7 +4808,7 @@ var cliFs = require("node:fs");
 var cliPath = require("node:path");
 var cliChildProcess = require("node:child_process");
 
-var CLI_VERSION = "0.8.0";
+var CLI_VERSION = "0.8.1";
 var CLI_HOST_PATH = process.env.GROK_SWITCH_HOST || "/home/box/sand-host/host-main.cjs";
 var CLI_HOST_VERSION_PATH = cliPath.join(cliPath.dirname(CLI_HOST_PATH), "version");
 var CLI_BACKUP_PATH = CLI_HOST_PATH + ".grok-switch.orig";
@@ -4824,7 +4842,7 @@ var CLI_USAGE = [
   "  log [N]                         show the last N upstream requests (default 20)",
   "  restart                         ask the supervisor to restart the host when idle",
   "  restore                         remove the patch from the host bundle and restart",
-  "  ui [--background] [--port N]    web panel on 127.0.0.1 for configuring providers (ui stop / ui status)",
+  "  ui [--background] [--port N]    web panel on 127.0.0.1 for configuring providers (ui stop / ui status / ui --new-token)",
   "",
   "provider options:",
   "  --url <baseUrl>                 e.g. https://api.openai.com/v1 (required)",
@@ -4862,7 +4880,7 @@ function cliParseArgs(argv) {
     var value;
     if (eq !== -1) {
       value = arg.slice(eq + 1);
-    } else if (name === "json" || name === "force" || name === "no-test" || name === "background" || name === "no-ui") {
+    } else if (name === "json" || name === "force" || name === "no-test" || name === "background" || name === "no-ui" || name === "new-token") {
       value = true;
     } else {
       if (i + 1 >= argv.length) throw new CliError("--" + name + " needs a value");
