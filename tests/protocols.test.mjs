@@ -195,11 +195,32 @@ test("SendMessage text calls drop only empty inactive payload branches", () => {
     raw,
     "unrelated tools are byte-semantically unchanged"
   );
-  const conflicting = { type: "text", content: "hello", widget: { prompt: "real" } };
+  // Production shape (gpt-5.6 via BeefAPI): fully formed widget and secret
+  // objects riding a type:text message. The host would reject the whole call
+  // ("Nothing was sent") and the model retries forever; the host documents the
+  // fields as ones it would "silently drop", so we drop them up front.
+  const conflicting = {
+    type: "text",
+    content: "hello",
+    widget: { prompt: "Pick one", options: [{ label: "A" }, { label: "B" }] },
+    secret: { label: "Slack token", connector: "slack", field: "token" },
+    to: "dm",
+    channel: "slack:general"
+  };
   assert.deepEqual(
     protocolTools.parseToolArgumentsObject(JSON.stringify(conflicting), "openai-responses", "send_message"),
-    conflicting,
-    "non-empty conflicting branches must still reach host validation"
+    { type: "text", content: "hello", to: "dm", channel: "slack:general" },
+    "type-scoped fields for other message types are dropped; fields valid for text stay"
+  );
+  assert.deepEqual(
+    protocolTools.parseToolArgumentsObject(JSON.stringify({ type: "widget", widget: { prompt: "Pick" }, content: "stray text" }), "openai-chat", "send_message"),
+    { type: "widget", widget: { prompt: "Pick" } },
+    "a widget message keeps its widget and loses text-only fields"
+  );
+  assert.deepEqual(
+    protocolTools.parseToolArgumentsObject(JSON.stringify({ content: "no type", widget: { prompt: "x" } }), "openai-chat", "send_message"),
+    { content: "no type", widget: { prompt: "x" } },
+    "without a declared type nothing is scoped away"
   );
 
   const args = JSON.stringify(raw);

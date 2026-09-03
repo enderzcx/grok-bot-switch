@@ -53,17 +53,34 @@ function isSendMessageTool(name) {
   return typeof name === "string" && /^(?:send_?message|send_?to_?user)$/i.test(name);
 }
 
-// Grok Bot's SendMessage schema has mutually-exclusive optional branches.
-// Some OpenAI-compatible providers materialize absent branches as {}, [], or
-// "", which makes the host reject an otherwise valid text message forever.
-// Remove only empty optional values; non-empty conflicts still fail closed.
+// Mirrors the host's TYPE_SCOPED_SEND_MESSAGE_FIELDS: each of these fields is
+// only meaningful for the listed message types.
+var SEND_MESSAGE_TYPE_SCOPED_FIELDS = {
+  content: ["text"],
+  url: ["attachment"],
+  alt: ["attachment"],
+  widget: ["widget"],
+  bcId: ["cursor-agent"],
+  secret: ["secret-request"]
+};
+
+// Grok Bot's SendMessage schema has mutually-exclusive optional branches keyed
+// by `type`. Some models fill every optional branch (an empty {} or even a
+// fully formed widget/secret object) on a plain type:text message; the host
+// rejects that with "Nothing was sent" and the model retries forever. The host
+// documents that such fields would otherwise be "silently dropped", so
+// dropping fields that do not belong to the declared type is equivalent and
+// stops the loop. Empty optional values are removed as well.
 function normalizeToolArguments(name, args) {
   if (!isSendMessageTool(name) || args == null || typeof args !== "object" || Array.isArray(args)) return args;
+  var declaredType = typeof args.type === "string" ? args.type : null;
   var out = {};
   var names = Object.keys(args);
   for (var i = 0; i < names.length; i += 1) {
     var key = names[i];
     if (key !== "type" && isEmptyOptionalValue(args[key])) continue;
+    var scope = SEND_MESSAGE_TYPE_SCOPED_FIELDS[key];
+    if (scope != null && declaredType != null && scope.indexOf(declaredType) === -1) continue;
     out[key] = args[key];
   }
   return out;

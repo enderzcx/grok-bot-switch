@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// grok-switch 0.7.0 - https://github.com/enderzcx/grok-bot-switch
+// grok-switch 0.7.1 - https://github.com/enderzcx/grok-bot-switch
 // Single-file build. Do not edit; regenerate with `node build.mjs`.
 "use strict";
 // GROK_SWITCH_PAYLOAD_BEGIN
@@ -720,17 +720,34 @@ function isSendMessageTool(name) {
   return typeof name === "string" && /^(?:send_?message|send_?to_?user)$/i.test(name);
 }
 
-// Grok Bot's SendMessage schema has mutually-exclusive optional branches.
-// Some OpenAI-compatible providers materialize absent branches as {}, [], or
-// "", which makes the host reject an otherwise valid text message forever.
-// Remove only empty optional values; non-empty conflicts still fail closed.
+// Mirrors the host's TYPE_SCOPED_SEND_MESSAGE_FIELDS: each of these fields is
+// only meaningful for the listed message types.
+var SEND_MESSAGE_TYPE_SCOPED_FIELDS = {
+  content: ["text"],
+  url: ["attachment"],
+  alt: ["attachment"],
+  widget: ["widget"],
+  bcId: ["cursor-agent"],
+  secret: ["secret-request"]
+};
+
+// Grok Bot's SendMessage schema has mutually-exclusive optional branches keyed
+// by `type`. Some models fill every optional branch (an empty {} or even a
+// fully formed widget/secret object) on a plain type:text message; the host
+// rejects that with "Nothing was sent" and the model retries forever. The host
+// documents that such fields would otherwise be "silently dropped", so
+// dropping fields that do not belong to the declared type is equivalent and
+// stops the loop. Empty optional values are removed as well.
 function normalizeToolArguments(name, args) {
   if (!isSendMessageTool(name) || args == null || typeof args !== "object" || Array.isArray(args)) return args;
+  var declaredType = typeof args.type === "string" ? args.type : null;
   var out = {};
   var names = Object.keys(args);
   for (var i = 0; i < names.length; i += 1) {
     var key = names[i];
     if (key !== "type" && isEmptyOptionalValue(args[key])) continue;
+    var scope = SEND_MESSAGE_TYPE_SCOPED_FIELDS[key];
+    if (scope != null && declaredType != null && scope.indexOf(declaredType) === -1) continue;
     out[key] = args[key];
   }
   return out;
@@ -3948,8 +3965,47 @@ function grokSwitchSilentCompletionStream(invocationId, modelId) {
   ], { grokSwitch: { deliveryBreakerCompleted: true } });
 }
 
+// Diagnostics: when GROK_SWITCH_DIR/debug exists, append a compact view of the
+// current turn's tool traffic (names, ids, truncated args/results) and the
+// breaker decision to debug.log. Off by default; the file is the switch.
+function grokSwitchDebugTurn(messages, history) {
+  var fs = grokSwitchFs();
+  try {
+    fs.statSync(GROK_SWITCH_DIR + "/debug");
+  } catch (_off) {
+    return;
+  }
+  var clip = function (value) {
+    var text;
+    try {
+      text = typeof value === "string" ? value : JSON.stringify(value);
+    } catch (_error) {
+      text = String(value);
+    }
+    return text == null ? null : text.length > 400 ? text.slice(0, 400) + "…(" + text.length + ")" : text;
+  };
+  var start = grokSwitchCurrentTurnStart(messages);
+  var turn = [];
+  for (var i = start; i < messages.length; i += 1) {
+    var m = messages[i];
+    var parts = grokSwitchMessageParts(m);
+    for (var j = 0; j < parts.length; j += 1) {
+      var p = parts[j];
+      if (p == null) continue;
+      if (p.type === "tool-call" || p.type === "tool_call") turn.push({ role: m.role, type: p.type, id: grokSwitchPartToolId(p), name: p.toolName || p.tool_name || p.name, args: clip(p.args) });
+      else if (p.type === "tool-result" || p.type === "tool_result") turn.push({ role: m.role, type: p.type, id: grokSwitchPartToolId(p), name: p.toolName || p.tool_name, isError: p.isError, result: clip(p.result !== void 0 ? p.result : p.content), keys: Object.keys(p) });
+      else turn.push({ role: m.role, type: p.type, text: clip(p.text) });
+    }
+    if (typeof m.content === "string") turn.push({ role: m.role, type: "string", text: clip(m.content) });
+  }
+  try {
+    fs.appendFileSync(GROK_SWITCH_DIR + "/debug.log", JSON.stringify({ ts: new Date().toISOString(), messages: messages.length, turnStart: start, history: history, turn: turn }) + "\n", { mode: 384 });
+  } catch (_error) {}
+}
+
 function grokSwitchDeliveryIntervention(messages, invocationId, modelId) {
   var history = grokSwitchDeliveryHistory(messages);
+  grokSwitchDebugTurn(messages, history);
   if (history.breakerCompleted) return grokSwitchSilentCompletionStream(invocationId, modelId);
   if (history.failed >= GROK_SWITCH_DELIVERY_BREAKER_THRESHOLD) {
     return grokSwitchDeliveryBreakerStream(invocationId, modelId, "外部模型连续 " + history.failed + " 次用无效参数调用消息工具。");
@@ -5004,7 +5060,7 @@ var cliFs = require("node:fs");
 var cliPath = require("node:path");
 var cliChildProcess = require("node:child_process");
 
-var CLI_VERSION = "0.7.0";
+var CLI_VERSION = "0.7.1";
 var CLI_HOST_PATH = process.env.GROK_SWITCH_HOST || "/home/box/sand-host/host-main.cjs";
 var CLI_HOST_VERSION_PATH = cliPath.join(cliPath.dirname(CLI_HOST_PATH), "version");
 var CLI_BACKUP_PATH = CLI_HOST_PATH + ".grok-switch.orig";

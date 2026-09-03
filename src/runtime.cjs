@@ -885,8 +885,47 @@ function grokSwitchSilentCompletionStream(invocationId, modelId) {
   ], { grokSwitch: { deliveryBreakerCompleted: true } });
 }
 
+// Diagnostics: when GROK_SWITCH_DIR/debug exists, append a compact view of the
+// current turn's tool traffic (names, ids, truncated args/results) and the
+// breaker decision to debug.log. Off by default; the file is the switch.
+function grokSwitchDebugTurn(messages, history) {
+  var fs = grokSwitchFs();
+  try {
+    fs.statSync(GROK_SWITCH_DIR + "/debug");
+  } catch (_off) {
+    return;
+  }
+  var clip = function (value) {
+    var text;
+    try {
+      text = typeof value === "string" ? value : JSON.stringify(value);
+    } catch (_error) {
+      text = String(value);
+    }
+    return text == null ? null : text.length > 400 ? text.slice(0, 400) + "…(" + text.length + ")" : text;
+  };
+  var start = grokSwitchCurrentTurnStart(messages);
+  var turn = [];
+  for (var i = start; i < messages.length; i += 1) {
+    var m = messages[i];
+    var parts = grokSwitchMessageParts(m);
+    for (var j = 0; j < parts.length; j += 1) {
+      var p = parts[j];
+      if (p == null) continue;
+      if (p.type === "tool-call" || p.type === "tool_call") turn.push({ role: m.role, type: p.type, id: grokSwitchPartToolId(p), name: p.toolName || p.tool_name || p.name, args: clip(p.args) });
+      else if (p.type === "tool-result" || p.type === "tool_result") turn.push({ role: m.role, type: p.type, id: grokSwitchPartToolId(p), name: p.toolName || p.tool_name, isError: p.isError, result: clip(p.result !== void 0 ? p.result : p.content), keys: Object.keys(p) });
+      else turn.push({ role: m.role, type: p.type, text: clip(p.text) });
+    }
+    if (typeof m.content === "string") turn.push({ role: m.role, type: "string", text: clip(m.content) });
+  }
+  try {
+    fs.appendFileSync(GROK_SWITCH_DIR + "/debug.log", JSON.stringify({ ts: new Date().toISOString(), messages: messages.length, turnStart: start, history: history, turn: turn }) + "\n", { mode: 384 });
+  } catch (_error) {}
+}
+
 function grokSwitchDeliveryIntervention(messages, invocationId, modelId) {
   var history = grokSwitchDeliveryHistory(messages);
+  grokSwitchDebugTurn(messages, history);
   if (history.breakerCompleted) return grokSwitchSilentCompletionStream(invocationId, modelId);
   if (history.failed >= GROK_SWITCH_DELIVERY_BREAKER_THRESHOLD) {
     return grokSwitchDeliveryBreakerStream(invocationId, modelId, "外部模型连续 " + history.failed + " 次用无效参数调用消息工具。");

@@ -1,6 +1,6 @@
 {
   "name": "grok-bot-switch",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "description": "Route Grok Bot cloud inference to your own OpenAI/Anthropic-compatible API with a single file.",
   "license": "MIT",
