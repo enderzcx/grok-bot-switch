@@ -22,7 +22,7 @@ var CLI_PATCH_BEGIN = "// GROK_SWITCH_BEGIN";
 var CLI_PATCH_END = "// GROK_SWITCH_END";
 var CLI_HOST_FACTORY = "function createHostInference(";
 var CLI_RENAMED_FACTORY = "function __grokSwitchOriginalCreateHostInference(";
-var CLI_REQUIRED_HOST_NAMES = ["BasePromptExecutor", "BasePromptBuilder", "function createCursorSandInference("];
+var CLI_REQUIRED_HOST_NAMES = ["BasePromptExecutor", "BasePromptBuilder"];
 
 var CLI_USAGE = [
   "grok-switch " + CLI_VERSION + " - route Grok Bot inference to your own model API",
@@ -578,7 +578,7 @@ async function cliCommandInstall(args) {
     cliPrint("host process already runs the patched code; no restart needed.");
   }
   cliPrint("route: " + (grokSwitchResolveRoute().kind === "official" ? "official Grok (unchanged until a provider is selected)" : "external provider selected"));
-  if (!args.flags["no-ui"]) {
+  if (!args.flags["no-ui"] && typeof uiCommand === "function") {
     await uiCommand({ positional: ["ui"], flags: { background: true, port: args.flags.port } });
   }
 }
@@ -801,7 +801,10 @@ async function cliMain(argv) {
   if (command === "log") return cliCommandLog(args);
   if (command === "restart") return cliCommandRestart(args);
   if (command === "restore") return cliCommandRestore(args);
-  if (command === "ui") return uiCommand(args);
+  if (command === "ui") {
+    if (typeof uiCommand !== "function") throw new CliError("ui panel is not included in this build (use the full grok-switch bundle)");
+    return uiCommand(args);
+  }
   throw new CliError("unknown command " + command + "\n\n" + CLI_USAGE);
 }
 

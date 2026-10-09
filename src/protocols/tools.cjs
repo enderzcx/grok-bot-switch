@@ -72,14 +72,19 @@ var SEND_MESSAGE_TYPE_SCOPED_FIELDS = {
 // dropping fields that do not belong to the declared type is equivalent and
 // stops the loop. Empty optional values are removed as well.
 function normalizeToolArguments(name, args) {
-  // The host routes these tools by property presence, even for null/empty IDs.
-  // Fail closed: never silently change the requested execution machine.
-  if (/^(?:Shell|Read|AwaitShell)$/i.test(name) && args != null && typeof args === "object" &&
-      Object.prototype.hasOwnProperty.call(args, "machineId") &&
-      (typeof args.machineId !== "string" || args.machineId.trim().length === 0)) {
-    throw contract.protocolError("Invalid machineId: omit the field for the cloud computer, or use a registered machine ID for a user computer. This call was not dispatched.", {
-      code: "invalid-machine-target"
-    });
+  // The host routes Shell/Read/AwaitShell by property presence: omitting machineId
+  // runs on the cloud computer. Models frequently pass null or empty string when
+  // targeting the cloud. Clean null/empty machineId so the call executes smoothly
+  // in the cloud sandbox; reject non-string types to fail closed on bogus payloads.
+  if (/^(?:Shell|Read|AwaitShell)$/i.test(name) && args != null && typeof args === "object" && !Array.isArray(args) &&
+      Object.prototype.hasOwnProperty.call(args, "machineId")) {
+    if (args.machineId == null || (typeof args.machineId === "string" && args.machineId.trim().length === 0)) {
+      delete args.machineId;
+    } else if (typeof args.machineId !== "string") {
+      throw contract.protocolError("Invalid machineId: omit the field for the cloud computer, or use a registered machine ID for a user computer. This call was not dispatched.", {
+        code: "invalid-machine-target"
+      });
+    }
   }
   if (!isSendMessageTool(name) || args == null || typeof args !== "object" || Array.isArray(args)) return args;
   var declaredType = typeof args.type === "string" ? args.type : null;

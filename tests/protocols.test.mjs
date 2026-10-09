@@ -28,10 +28,16 @@ test("Responses keeps host optional fields non-strict unless explicitly requeste
   }
 });
 
-test("machine-target validation fails closed without rerouting or mutating arguments", () => {
+test("machine-target validation cleans empty/null targets to cloud and rejects non-string types", () => {
   for (const protocol of PROTOCOL_IDS) {
     for (const name of ["Shell", "Read", "AwaitShell"]) {
-      for (const value of [null, "", "  ", 0, false, [], {}]) {
+      for (const value of [null, "", "  "]) {
+        const raw = JSON.stringify({ machineId: value });
+        assert.deepEqual(protocolTools.parseToolArgumentsObject(raw, protocol, name), {});
+        const withCommand = JSON.stringify({ command: "hostname", machineId: value });
+        assert.deepEqual(protocolTools.parseToolArgumentsObject(withCommand, protocol, name), { command: "hostname" });
+      }
+      for (const value of [0, false, [], {}]) {
         const raw = JSON.stringify({ machineId: value });
         assert.throws(() => protocolTools.parseToolArgumentsObject(raw, protocol, name),
           error => error.code === "invalid-machine-target" && /not dispatched/.test(error.message));
@@ -55,10 +61,24 @@ test("Responses streaming rejects invalid machine targets before completing a to
   const item = { id: "fc_target", type: "function_call", call_id: "call_target", name: "Shell", arguments: "" };
   const frame = data => utf8(`data: ${JSON.stringify(data)}\n\n`);
   const events = decoder.push(frame({ type: "response.output_item.added", output_index: 0, item }));
-  events.push(...decoder.push(frame({ type: "response.function_call_arguments.delta", output_index: 0, delta: '{"command":"hostname","machineId":null}' })));
+  events.push(...decoder.push(frame({ type: "response.function_call_arguments.delta", output_index: 0, delta: '{"command":"hostname","machineId":0}' })));
   assert.equal(events.some(event => event.type === "tool-call"), false);
   assert.throws(() => decoder.push(frame({ type: "response.function_call_arguments.done", output_index: 0,
-    arguments: '{"command":"hostname","machineId":null}' })), error => error.code === "invalid-machine-target");
+    arguments: '{"command":"hostname","machineId":0}' })), error => error.code === "invalid-machine-target");
+});
+
+test("Responses streaming cleans null or empty machineId to cloud sandbox target", () => {
+  const adapter = require("../src/protocols/openai-responses.cjs");
+  const decoder = adapter.createStreamDecoder();
+  const item = { id: "fc_target", type: "function_call", call_id: "call_target", name: "Shell", arguments: "" };
+  const frame = data => utf8(`data: ${JSON.stringify(data)}\n\n`);
+  decoder.push(frame({ type: "response.output_item.added", output_index: 0, item }));
+  decoder.push(frame({ type: "response.function_call_arguments.delta", output_index: 0, delta: '{"command":"hostname","machineId":null}' }));
+  const doneEvents = decoder.push(frame({ type: "response.function_call_arguments.done", output_index: 0,
+    arguments: '{"command":"hostname","machineId":null}' }));
+  const toolCall = doneEvents.find(event => event.type === "tool-call");
+  assert.ok(toolCall);
+  assert.deepEqual(toolCall.args, { command: "hostname" });
 });
 
 function readJson(path) {

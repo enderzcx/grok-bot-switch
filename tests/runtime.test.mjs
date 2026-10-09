@@ -575,7 +575,7 @@ test("OAuth-shaped Responses never dispatch invalid machine arguments to the hos
   const auth = { tokens: { access_token: "synthetic", account_id: "synthetic" } };
   const provider = { protocol: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", model: "gpt-5-codex", authType: "codex" };
   const files = new Map([[CONFIG_PATH, config("cx", { cx: provider })], ["/codex/auth.json", JSON.stringify(auth)]]);
-  const args = '{"command":"hostname","machineId":null}';
+  const args = '{"command":"hostname","machineId":0}';
   const frames = [
     { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "Shell", arguments: "" } },
     { type: "response.function_call_arguments.delta", output_index: 0, delta: args },
@@ -586,6 +586,25 @@ test("OAuth-shaped Responses never dispatch invalid machine arguments to the hos
   assert.match(out.streamError.message, /Invalid machineId/);
   assert.equal(out.events.some(e => e.type === "tool-call" || e.type === "tool-call-delta"), false);
   assert.equal(host.fetches.length, 1, "no retry or native fallback");
+});
+
+test("OAuth-shaped Responses clean null/empty machineId and dispatch cloud tool calls to host", async () => {
+  const auth = { tokens: { access_token: "synthetic", account_id: "synthetic" } };
+  const provider = { protocol: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", model: "gpt-5-codex", authType: "codex" };
+  const files = new Map([[CONFIG_PATH, config("cx", { cx: provider })], ["/codex/auth.json", JSON.stringify(auth)]]);
+  const args = '{"command":"hostname","machineId":null}';
+  const frames = [
+    { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "Shell", arguments: "" } },
+    { type: "response.function_call_arguments.delta", output_index: 0, delta: args },
+    { type: "response.function_call_arguments.done", output_index: 0, arguments: args },
+    { type: "response.completed", response: { id: "r_1", status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 }, output: [{ type: "function_call", id: "fc_1", call_id: "call_1" }] } }
+  ].map(x => `data: ${JSON.stringify(x)}\n\n`).join("");
+  const host = loadHost({ files, fetchImpl: () => sse(frames) });
+  const out = await drain(host.inference.createSession(null, {}).getExecutor([{ role: "user", content: "hostname" }]).stream({}, "i", [], {}));
+  assert.equal(out.streamError, null);
+  const toolCall = out.events.find(e => e.type === "tool-call");
+  assert.ok(toolCall);
+  assert.deepEqual(plain(toolCall.args), { command: "hostname" });
 });
 
 test("codex auth signs with the ChatGPT login and refreshes once on 401", async () => {
