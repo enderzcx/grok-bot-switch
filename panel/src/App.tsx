@@ -132,7 +132,7 @@ export default function App() {
     if (probe && !probe.ok) return;
     setForm(null);
     toast(probe ? `${name} 测试通过（${probe.ms}ms）` : `${name} 已保存`, "ok");
-    if (useNow) void run("use:" + name, () => api.use(name));
+    if (useNow && next.route !== "unsupported") void run("use:" + name, () => api.use(name));
   }
 
   if (loadError && !state) {
@@ -189,18 +189,18 @@ export default function App() {
       <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6 space-y-6">
         <section className="rounded-xl border border-border bg-card p-4 shadow-sm flex flex-wrap items-center gap-4">
           <div className="flex-1 min-w-[220px]">
-            <p className="text-xs text-muted-foreground">当前对话使用</p>
+            <p className="text-xs text-muted-foreground">模型来源设置</p>
             <div className="flex flex-wrap items-center gap-2 mt-1">
-              <span className="text-lg font-semibold">{state.route === "official" ? "官方 Grok" : state.route === "external" ? state.active : "配置有误"}</span>
+              <span className="text-lg font-semibold">{state.route === "unsupported" ? "此版本不支持切换" : state.route === "official" ? "官方 Grok" : state.route === "external" ? state.active : "配置有误"}</span>
               {state.route === "external" && activeProvider && <ProviderStatusBadge label={activeProvider.protocol === "anthropic-messages" ? "Anthropic" : activeProvider.protocol === "openai-responses" ? "Responses" : "Chat"} tone="info" />}
               {restartPending && <ProviderStatusBadge label="等待主程序重启" tone="warning" title="补丁刚更新，Grok 的 supervisor 会在没有 Bot 忙碌时重启主程序，之后新对话生效。" />}
             </div>
             <p className="text-xs text-muted-foreground font-mono break-all mt-1">
-              {state.route === "external" && activeProvider ? activeProvider.summary : state.route === "error" ? state.routeError : "选择下面任一来源后，下一条消息生效"}
+              {state.route === "unsupported" ? "当前网页版 Bot 的对话由 Grok 服务端运行，Switch 无法替换它的模型。单独的 API 测试成功也不会改变对话模型。" : state.route === "external" && activeProvider ? activeProvider.summary : state.route === "error" ? state.routeError : "选择下面任一来源后，下一条消息生效"}
             </p>
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-            <Dot ok={host.exists && host.patched} warn={host.exists && !host.patched} label={!host.exists ? "未找到主程序" : host.patched ? "补丁已就位" : "未打补丁"} />
+            <Dot ok={state.route !== "unsupported" && host.exists && host.patched} warn={state.route === "unsupported" || (host.exists && !host.patched)} label={state.route === "unsupported" ? "无法切换模型" : !host.exists ? "未找到主程序" : host.patched ? "补丁已就位" : "未打补丁"} />
             <Dot ok={host.process != null && host.runningCurrentBundle !== false} warn={host.process == null || host.runningCurrentBundle === false} label={host.process ? (host.runningCurrentBundle === false ? "重启待执行" : "主程序运行中") : "主程序未运行"} />
             <Dot ok={!host.supervisor.busy} warn={host.supervisor.busy} label={host.supervisor.busy ? "Bot 忙碌中" : "空闲"} />
           </div>
@@ -211,7 +211,7 @@ export default function App() {
             <h2 className="text-sm font-medium text-muted-foreground">模型来源</h2>
             <span className="text-xs text-muted-foreground">{names.length ? `${names.length} 个自定义来源` : ""}</span>
           </div>
-          <ProviderCard name="official" provider={null} active={state.route === "official"} busy={busy != null} switching={busy === "official"} onUse={() => void run("official", () => api.official(), "已切回官方 Grok，下一条消息生效")} />
+          <ProviderCard name="official" provider={null} active={state.route === "official" || (state.route === "unsupported" && state.active == null)} busy={busy != null} switching={busy === "official"} onUse={() => void run("official", () => api.official(), "已清除外部模型选择，使用官方 Grok")} />
           {names.length === 0 && (
             <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
               还没有自定义模型来源。点右上角"添加"，或在下方用 ChatGPT 登录。
@@ -222,8 +222,9 @@ export default function App() {
               key={name}
               name={name}
               provider={state.providers[name]}
-              active={state.active === name}
+              active={state.route === "external" && state.active === name}
               busy={busy != null}
+              useDisabled={state.route === "unsupported"}
               switching={busy === "use:" + name}
               onUse={() => void run("use:" + name, () => api.use(name))}
               onEdit={() => setForm({ editing: name })}
@@ -367,7 +368,7 @@ export default function App() {
         </section>
       </main>
 
-      {form && <ProviderForm editing={form.editing} initial={form.editing ? state.providers[form.editing] : null} takenNames={names} onClose={() => setForm(null)} onSaved={onSaved} />}
+      {form && <ProviderForm editing={form.editing} initial={form.editing ? state.providers[form.editing] : null} takenNames={names} switchingUnavailable={state.route === "unsupported"} onClose={() => setForm(null)} onSaved={onSaved} />}
 
       <ConfirmDialog
         isOpen={review != null}
@@ -389,9 +390,9 @@ export default function App() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>在聊天里切换</DialogTitle>
-            <DialogDescription>这些消息在云端主程序里直接处理，不发给任何模型、不花 token，任何平台都一样。</DialogDescription>
+            <DialogDescription>{state.route === "unsupported" ? "当前 Bot 不支持这些聊天切换命令。可以在云端终端运行 status 查看兼容性，或运行 official 清除外部模型选择。" : "兼容的 Bot 会在云端主程序里直接处理这些消息，不发给模型。"}</DialogDescription>
           </DialogHeader>
-          <div className="space-y-2 text-sm">
+          {state.route !== "unsupported" && <div className="space-y-2 text-sm">
             <p>
               <code className="rounded bg-muted px-1.5 py-0.5 font-mono">/gs use 名字</code> 切到某个来源，下一条消息生效
             </p>
@@ -402,7 +403,7 @@ export default function App() {
               <code className="rounded bg-muted px-1.5 py-0.5 font-mono">/gs status</code> 看当前走哪里、保存了哪些来源
             </p>
             <p className="text-muted-foreground text-xs pt-2">添加来源（带 key）只能在这个面板或云端终端里做；聊天命令不接受 key。给用外部模型的 Bot 建议关掉"本机执行"，否则模型可能把命令跑到你自己的电脑上。</p>
-          </div>
+          </div>}
           <DialogFooter>
             <Button onClick={() => setHelpOpen(false)}>知道了</Button>
           </DialogFooter>

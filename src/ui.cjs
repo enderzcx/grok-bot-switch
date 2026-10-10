@@ -103,13 +103,14 @@ function uiMaskedProviders(config) {
 
 function uiState() {
   var config = cliReadRawConfig();
-  var route = grokSwitchResolveRoute();
+  var host = cliHostState();
+  var route = cliReportedRoute(grokSwitchResolveRoute(), host);
   return {
     version: CLI_VERSION,
-    host: cliHostState(),
+    host: host,
     active: config.active,
     route: route.kind,
-    routeError: route.kind === "error" ? route.message : null,
+    routeError: route.kind === "error" || route.kind === "unsupported" ? route.message : null,
     providers: uiMaskedProviders(config),
     usage: cliUsageTotals(),
     recent: cliReadLog(8),

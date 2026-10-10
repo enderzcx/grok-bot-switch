@@ -60,12 +60,14 @@ export function ProviderForm({
   editing,
   initial,
   takenNames,
+  switchingUnavailable,
   onClose,
   onSaved,
 }: {
   editing: string | null;
   initial: Provider | null;
   takenNames: string[];
+  switchingUnavailable?: boolean;
   onClose: () => void;
   onSaved: (state: State, name: string, probe: Probe | null, useNow: boolean) => void;
 }) {
@@ -152,14 +154,15 @@ export function ProviderForm({
             <Save className="h-4 w-4" />
             {pending === "save" ? "测试中…" : "测试并保存"}
           </Button>
-          <Button disabled={busy} onClick={() => void submit(null, true)}>
+          <Button disabled={busy || switchingUnavailable} onClick={() => void submit(null, true)}>
             <Play className="h-4 w-4" />
             {pending === "use" ? "测试中…" : "测试、保存并使用"}
           </Button>
         </>
       }
     >
-      <form id="provider-form" className="space-y-6" onSubmit={(e) => void submit(e, true)}>
+      <form id="provider-form" className="space-y-6" onSubmit={(e) => void submit(e, !switchingUnavailable)}>
+        {switchingUnavailable && <p className="text-sm text-muted-foreground">当前 Bot 无法切换模型。测试并保存只会检查 API；测试会向供应商发送请求，可能产生费用。</p>}
         {!editing && (
           <div className="space-y-2">
             <Label>快速填入</Label>

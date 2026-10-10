@@ -6,6 +6,7 @@ export function ProviderActions({
   active,
   official,
   busy,
+  useDisabled,
   switching,
   onUse,
   onEdit,
@@ -16,6 +17,7 @@ export function ProviderActions({
   active: boolean;
   official: boolean;
   busy: boolean;
+  useDisabled?: boolean;
   switching: boolean;
   onUse: () => void;
   onEdit?: () => void;
@@ -29,7 +31,7 @@ export function ProviderActions({
       <Button
         size="sm"
         variant={active ? "secondary" : "default"}
-        disabled={busy || active}
+        disabled={busy || active || useDisabled}
         onClick={onUse}
         className="w-fit px-2.5"
       >

@@ -26,6 +26,7 @@ export interface HostState {
   backupExists: boolean;
   process: { pid: number; startedAtMs: number | null } | null;
   runningCurrentBundle: boolean | null;
+  compatibility: { kind: "cloud-inference" | "server-hosted"; supported: boolean; reason: string | null } | null;
   supervisor: { busy: boolean; pending: { id: string } | null };
 }
 
@@ -61,7 +62,7 @@ export interface State {
   version: string;
   host: HostState;
   active: string | null;
-  route: "official" | "external" | "error";
+  route: "official" | "external" | "error" | "unsupported";
   routeError: string | null;
   providers: Record<string, Provider>;
   usage: Record<string, UsageTotal>;
