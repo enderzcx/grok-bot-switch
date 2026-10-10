@@ -195,9 +195,10 @@ export default function App() {
               {state.route === "external" && activeProvider && <ProviderStatusBadge label={activeProvider.protocol === "anthropic-messages" ? "Anthropic" : activeProvider.protocol === "openai-responses" ? "Responses" : "Chat"} tone="info" />}
               {restartPending && <ProviderStatusBadge label="等待主程序重启" tone="warning" title="补丁刚更新，Grok 的 supervisor 会在没有 Bot 忙碌时重启主程序，之后新对话生效。" />}
             </div>
-            <p className="text-xs text-muted-foreground font-mono break-all mt-1">
-              {state.route === "unsupported" ? "当前网页版 Bot 的对话由 Grok 服务端运行，Switch 无法替换它的模型。单独的 API 测试成功也不会改变对话模型。" : state.route === "external" && activeProvider ? activeProvider.summary : state.route === "error" ? state.routeError : "选择下面任一来源后，下一条消息生效"}
+            <p className="text-xs text-muted-foreground break-words mt-1">
+              {state.route === "unsupported" ? host.compatibility?.kind === "server-hosted" ? "这个 Bot 的对话由 Grok 服务端运行，无法切换模型。API 测试通过也不会改变对话模型。" : "暂时无法确认这个 Bot 是否支持切换。请在云端终端运行 status 查看原因；API 测试不会改变对话模型。" : state.route === "external" && activeProvider ? activeProvider.summary : state.route === "error" ? state.routeError : "选择下面任一来源后，下一条消息生效"}
             </p>
+            {state.route === "unsupported" && host.patched && <p className="text-xs text-amber-700 dark:text-amber-400 mt-2">旧补丁仍可能让辅助任务调用已保存的 API 并产生费用。请先使用官方 Grok 清除外部选择，再卸载补丁。</p>}
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
             <Dot ok={state.route !== "unsupported" && host.exists && host.patched} warn={state.route === "unsupported" || (host.exists && !host.patched)} label={state.route === "unsupported" ? "无法切换模型" : !host.exists ? "未找到主程序" : host.patched ? "补丁已就位" : "未打补丁"} />
@@ -249,7 +250,7 @@ export default function App() {
                     {!codex.installed ? <ProviderStatusBadge label="未安装 Codex CLI" tone="warning" /> : codex.loggedIn ? <ProviderStatusBadge label="已登录" tone="success" /> : <ProviderStatusBadge label="未登录" tone="muted" />}
                     <ProviderStatusBadge label="实验性" tone="muted" title="让 Codex 后端为非 Codex 程序提供服务，在 OpenAI 条款上属擦边行为，账号有被限制的可能。" />
                   </div>
-                  <p className="text-xs text-muted-foreground">不需要 API key，登录在你自己的设备上完成，云端只保存登录凭据。</p>
+                  <p className="text-xs text-muted-foreground">{state.route === "unsupported" ? "当前 Bot 无法接入 ChatGPT 订阅，暂时无需登录。" : "不需要 API key，登录在你自己的设备上完成，云端只保存登录凭据。"}</p>
                   {codex.installed && login?.status === "running" && (
                     <ol className="text-sm space-y-1 list-decimal pl-5">
                       <li>
@@ -281,7 +282,7 @@ export default function App() {
               </div>
               <div className="flex-shrink-0">
                 {!codex.installed ? (
-                  <Button size="sm" disabled={busy != null || install?.status === "running"} onClick={() => void run("codex-install", () => api.codexInstall(), "开始安装 Codex CLI")}>
+                  <Button size="sm" disabled={busy != null || state.route === "unsupported" || install?.status === "running"} onClick={() => void run("codex-install", () => api.codexInstall(), "开始安装 Codex CLI")}>
                     {install?.status === "running" ? "安装中…" : "安装 Codex CLI"}
                   </Button>
                 ) : login?.status === "running" ? (
@@ -289,7 +290,7 @@ export default function App() {
                     取消
                   </Button>
                 ) : (
-                  <Button size="sm" disabled={busy != null} onClick={() => void run("codex-login", () => api.codexLogin(codexName || "chatgpt", codexModel), "已开始登录流程")}>
+                  <Button size="sm" disabled={busy != null || state.route === "unsupported"} onClick={() => void run("codex-login", () => api.codexLogin(codexName || "chatgpt", codexModel), "已开始登录流程")}>
                     {codex.loggedIn ? "重新登录并保存" : "登录 ChatGPT"}
                   </Button>
                 )}

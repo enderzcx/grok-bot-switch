@@ -26,7 +26,7 @@ export interface HostState {
   backupExists: boolean;
   process: { pid: number; startedAtMs: number | null } | null;
   runningCurrentBundle: boolean | null;
-  compatibility: { kind: "cloud-inference" | "server-hosted"; supported: boolean; reason: string | null } | null;
+  compatibility: { kind: "cloud-inference" | "server-hosted" | "unknown"; supported: boolean; reason: string | null } | null;
   supervisor: { busy: boolean; pending: { id: string } | null };
 }
 

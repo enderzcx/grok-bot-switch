@@ -187,7 +187,7 @@ export function ProviderForm({
 
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
-            <Label htmlFor="name">名字（聊天里用 /gs use 名字）</Label>
+              <Label htmlFor="name">{switchingUnavailable ? "名字" : "名字（聊天里用 /gs use 名字）"}</Label>
             <ImeSafeInput id="name" value={name} onValueChange={setName} placeholder="myapi" disabled={Boolean(editing)} autoComplete="off" />
             {nameError && <p className="text-xs text-amber-600 dark:text-amber-400">{nameError}</p>}
           </div>
