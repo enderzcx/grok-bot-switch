@@ -1,6 +1,10 @@
 # Grok Bot Switch
 
-让 Grok Bot 用你自己的模型。一段提示词让 Grok Bot 装好并打开配置面板，你在面板里填供应商（API key 或 ChatGPT 登录），之后在聊天里发 `/gs use 名字` 切换、`/gs official` 切回。支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三种协议。非 xAI / X 官方项目。
+为仍在云端电脑运行对话推理的 Grok Bot 接入自己的模型。支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三种协议。非 xAI / X 官方项目。
+
+**当前新版网页版 Bot 不支持切换。** 2026-10-10 对新建网页版 Bot、宿主 `964107d` 的真实验收发现：主对话已经改由 Grok 服务端执行，云端电脑里的推理入口只用于辅助任务。Switch 的补丁和独立 API 测试成功都不能改变它的对话模型。v0.8.7 会拒绝这类宿主的安装和切换，并在状态和面板中明确显示不支持；`install` / `use` 的拒绝发生在探测 API、保存新配置和修改宿主之前。独立的 `test` 或面板“测试并保存”仍会发送请求、可能产生费用，并不会切换对话模型。尚未找到可用的服务端自定义模型入口。
+
+以下安装和切换步骤仅适用于仍使用云端对话推理的旧版宿主。旧版代码的回归测试不代表所有账号或宿主都已完成真实接入验收。
 
 ## 怎么用
 
@@ -18,7 +22,7 @@
 - **用 ChatGPT 订阅**：点"登录 ChatGPT"，面板显示一个网址和一次性验证码，你在**自己的**手机或电脑上打开网址、输验证码，登录完成后面板自动保存一个供应商。不需要 API key，用的是 Plus/Pro 额度；云端未装 Codex CLI 时面板有一键安装按钮。
 - **切换**：点供应商右边的"使用"，或"切回官方 Grok"，下一条消息生效，不重启。
 
-**3. 以后在聊天框里切**，任何平台都行，不用面板也不用终端，不调模型、不花 token：
+**3. 兼容的 Bot 可以在聊天框里切**，不用面板也不用终端，不调模型、不花 token：
 
 | 在聊天框里发 | 效果 |
 |---|---|
@@ -65,17 +69,19 @@
 
 ## 原理
 
-Grok Bot 的推理请求不是从你的 Mac/Windows 发出的，而是从它的云端 Linux 电脑里的主程序 `/home/box/sand-host/host-main.cjs` 发出的。本工具把一段包装代码接到主程序创建推理会话的地方，每次新建会话时读一遍 `/workspace/grok-switch/config.json`：
+旧版 Grok Bot 的主对话推理请求从云端 Linux 电脑里的主程序发出，常见路径为 `/home/box/sand-host/host-main.cjs` 或 `/opt/sand/sand-host/host-main.cjs`，Switch 会自动查找。本工具把一段包装代码接到主程序创建推理会话的地方，每次新建会话时读一遍 `/workspace/grok-switch/config.json`：
 
 - 没有选中的供应商 → 走官方 Grok，行为不变。
 - 选中了供应商 → 直接从云端 `fetch` 你的 API，带上凭据；请求、流式回复、工具调用、推理内容都按协议转换。
 - 最后一条用户消息以 `/gs` 开头 → 在主程序里直接执行、直接回复，不发给任何模型。
 
-因为路由是每次会话时决定的，切换只是改配置文件，**不需要重启**。为什么装的时候要重启一次：主程序是一个已经在跑的 Node 进程，代码在启动时已读进内存，改磁盘文件不会影响它，只有重启才会带着补丁起来。这一次重启在 `install` 时就申请了，由 Grok 自带的 supervisor 在没有 Bot 忙碌时执行（Grok 给自己升级用的同一机制）；之后除 Grok Bot 升级覆盖主程序需要重新打补丁外，不再重启。补丁只依赖主程序里 `createHostInference` 这一个函数名，不校验版本哈希；写入前 `node --check`，原文件备份为 `host-main.cjs.grok-switch.orig`，`restore` 后逐字节一致。
+因为旧版路由在每次会话时决定，切换只是改配置文件，**不需要重启**。装的时候要重启一次：主程序是一个已经在跑的 Node 进程，代码在启动时已读进内存，改磁盘文件不会影响它，只有重启才会带着补丁起来。这一次重启在 `install` 时就申请了，由 Grok 自带的 supervisor 在没有 Bot 忙碌时执行；之后除 Grok Bot 升级覆盖主程序需要重新打补丁外，不再重启。安装前检查宿主是否停用了云端主对话入口以及补丁所需的代码结构；仅保留 `createHostInference` 函数不代表可接入。写入前 `node --check`，原文件备份为 `host-main.cjs.grok-switch.orig`，`restore` 后逐字节一致。
 
 面板是 `dist/grok-switch.cjs` 里内嵌的一页 HTML（移植自 CC Switch 的 React 界面，构建后内联成单文件），由同一个文件起的 HTTP 服务提供，只监听 127.0.0.1，接口只接受来自面板页面本身的同源请求（校验 Host、Origin 和自定义请求头）；它调用的就是上面的终端命令，不多一套逻辑。
 
 ## 边界与注意
+
+- v0.8.7 修复新版宿主误报可接入、无效安装仍请求重启和切换前发送付费探测的问题。未知的已退役错误路径也会拒绝，避免宿主代码稍有变化就误判支持。同时存在新旧宿主文件时优先选择正在运行的那个，无法确定时拒绝安装/切换，可用 `GROK_SWITCH_HOST` 显式指定。已有补丁也会重新检查宿主是否兼容；它仍可能让辅助任务调用已选 API，先运行 `official` 停止外部路由，再 `restore` 卸载。独立 API 测试仍可使用、可能产生费用。此版本不提供新版网页版 Bot 的主模型切换能力。
 
 - v0.8.6 保留工具的 `strict` 设置，Responses 默认使用 `strict: false`，保持可选参数语义。Shell、Read、AwaitShell 的 `machineId` 为 null 或空字符串时会省略该字段；非字符串会明确报错并阻止调用。有效机器 ID 保持原样。版本升级会重新安装注入段并请求重启。此修复尚未通过真实 ChatGPT OAuth 故障账号验收，不代表所有 OAuth 兼容问题已解决。
 

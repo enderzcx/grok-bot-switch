@@ -17,6 +17,7 @@ export function ProviderCard({
   provider,
   active,
   busy,
+  useDisabled,
   switching,
   onUse,
   onEdit,
@@ -28,6 +29,7 @@ export function ProviderCard({
   provider: Provider | null;
   active: boolean;
   busy: boolean;
+  useDisabled?: boolean;
   switching: boolean;
   onUse: () => void;
   onEdit?: () => void;
@@ -68,7 +70,7 @@ export function ProviderCard({
             )}
           </div>
         </div>
-        <ProviderActions active={active} official={official} busy={busy} switching={switching} onUse={onUse} onEdit={onEdit} onTest={onTest} onDuplicate={onDuplicate} onDelete={onDelete} />
+        <ProviderActions active={active} official={official} busy={busy} useDisabled={useDisabled} switching={switching} onUse={onUse} onEdit={onEdit} onTest={onTest} onDuplicate={onDuplicate} onDelete={onDelete} />
       </div>
     </article>
   );

@@ -25,8 +25,13 @@
     <header class="hero">
       <div class="hero-badge">Grok Bot Switch</div>
       <h1>让 Grok Bot 用你自己的模型</h1>
-      <p class="hero-sub">一段提示词装好，之后在聊天框里一行字切换。支持 OpenAI / Claude 兼容接口，也能直接用 ChatGPT 订阅。</p>
+      <p class="hero-sub">适用于仍在云端电脑运行对话推理的旧版 Bot。支持 OpenAI / Claude 兼容接口，也能用 ChatGPT 订阅。</p>
     </header>
+
+    <div class="card card-warn">
+      <h2>当前新版网页版 Bot 不支持切换</h2>
+      <p>新版主对话由 Grok 服务端运行，云端补丁无法替换它的模型。v0.8.7 会检查并拒绝已停用云端对话入口的宿主。API 测试通过也不代表 Bot 已切换；下面的步骤仅适用于兼容的旧版宿主。</p>
+    </div>
 
     <nav class="tabs" id="tabs">
       <button class="tab is-active" type="button" data-view="install">安装</button>
@@ -103,7 +108,7 @@
     <section class="view" id="view-switch">
       <div class="card">
         <h2>装好之后，在聊天框里切</h2>
-        <p class="muted">这些消息在云端主程序里直接处理，不发给任何模型、不花 token、任何平台都一样。</p>
+        <p class="muted">兼容的旧版 Bot 会在云端主程序里直接处理这些消息，不发给模型。新版网页版 Bot 不支持这些切换命令。</p>
         <table class="cmd">
           <tr><td><code>/gs use myapi</code></td><td>切到已保存的供应商，下一条消息生效</td></tr>
           <tr><td><code>/gs official</code></td><td>切回官方 Grok，配置保留</td></tr>
@@ -149,7 +154,7 @@
       <div class="card faq" id="faq">
         <details>
           <summary>它是怎么工作的？会改我电脑上的 Grok Bot 吗？</summary>
-          <p>不改你本机的任何东西。Grok Bot 的推理请求不是从你的 Mac / Windows 发出的，而是从它的云端 Linux 电脑里的主程序发出的。工具在云端主程序创建推理会话的地方接了一段代码：没选供应商就照旧走官方 Grok；选了就直接从云端请求你的接口，请求、流式回复、工具调用、推理内容都按协议转换。</p>
+          <p>不改你本机的文件。旧版 Bot 的主对话推理在云端电脑执行，工具会包装它创建推理会话的入口：没选供应商就走官方 Grok；选了就从云端请求你的接口。当前新版网页版 Bot 已把主对话推理移到 Grok 服务端，云端补丁无法切换它的模型。</p>
         </details>
         <details>
           <summary>为什么安装时要重启一次主程序？以后每次切换都要重启吗？</summary>
@@ -157,7 +162,7 @@
         </details>
         <details>
           <summary>Grok Bot 升级了怎么办？</summary>
-          <p>升级会覆盖主程序，补丁随之丢失，请求会自动回到官方 Grok。面板和 <code>/gs status</code> 会提示；再点一次"使用"或把安装提示词再发一次即可重新打补丁。工具不依赖 Grok Bot 的具体版本号，只认主程序里一个函数名。</p>
+          <p>升级可能覆盖补丁或改变对话执行方式。请先在云端终端运行 <code>status</code> 查看兼容性；仅保留推理函数不代表可以接入。兼容的旧版宿主可以重新安装；已停用云端主对话入口的宿主会被拒绝，不会继续打补丁或发切换测试请求。</p>
         </details>
         <details>
           <summary>API key 会被谁看到？</summary>

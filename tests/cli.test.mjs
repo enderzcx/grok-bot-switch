@@ -14,6 +14,7 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = path.join(root, "dist", "grok-switch.cjs");
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
 const REAL_BUNDLE = process.env.GROK_SWITCH_REAL_BUNDLE || path.join(root, "..", "grok_home", "research", "current-0.30", "host-main.cjs");
+const RETIRED_REAL_BUNDLE = process.env.GROK_SWITCH_RETIRED_BUNDLE;
 
 // Mirrors the shape of the real bundle around the anchors we rely on.
 const FAKE_BUNDLE = `"use strict";
@@ -29,6 +30,21 @@ function createHostInference(options2) {
   return createCursorSandInference({ getAccessToken: auth2.getAccessToken });
 }
 module.exports = { createHostInference };
+`;
+
+// The new cloud host still ships the old inference factory, but explicitly
+// retires every local main-conversation turn. Its presence alone is not support.
+const RETIRED_BOX_HARNESS = `
+class RetiredBoxHarness {
+  async sendPrompt(prompt, options2) {
+    const gatedAgentId = options2.agentId;
+    this.refuseBoxTurn(gatedAgentId ?? "unknown");
+  }
+  refuseBoxTurn(conversationId) {
+    this.tm.boxHarnessRefusals.reportBlocked({ conversationId, entry: "send", source: "turn" });
+    throw new SandBoxHarnessRetiredError();
+  }
+}
 `;
 
 function makeEnv() {
@@ -227,6 +243,137 @@ test("validation errors are reported without touching the host or config", () =>
   r = run({ ...env, GROK_SWITCH_API_KEY: "from-env" }, "add", "p", "--url", "https://a.example.com", "--model", "m");
   assert.equal(r.code, 0, r.err);
   assert.equal(JSON.parse(fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "config.json"), "utf8")).providers.p.apiKey, "from-env");
+});
+
+test("server-hosted conversations are rejected before probing, patching or selecting a provider", async () => {
+  const { dir, host, env } = makeEnv();
+  const original = FAKE_BUNDLE + RETIRED_BOX_HARNESS;
+  fs.writeFileSync(host, original);
+  let requests = 0;
+  const { server, port } = await startFakeOpenAi(() => {
+    requests += 1;
+    return { status: 200 };
+  });
+  try {
+    const r = await runAsync(env, "use", "local", "--url", `http://127.0.0.1:${port}/v1`, "--model", "m1", "--key", "k1");
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.err, /server-hosted/);
+    assert.equal(requests, 0, "an unsupported Bot must not incur a provider probe");
+    assert.equal(fs.readFileSync(host, "utf8"), original);
+    assert.equal(fs.existsSync(host + ".grok-switch.orig"), false);
+    assert.equal(fs.existsSync(path.join(env.GROK_SWITCH_DIR, "config.json")), false);
+    assert.equal(fs.existsSync(path.join(dir, "sup", "command.json")), false);
+    const status = JSON.parse(run(env, "status", "--json").out);
+    assert.equal(status.host.compatibility.kind, "server-hosted");
+    assert.equal(status.host.compatibility.supported, false);
+    assert.equal(status.config.route, "unsupported");
+    for (const bundle of [DIST, path.join(root, "dist", "grok-switch-core.cjs")]) {
+      const install = spawnSync(process.execPath, [bundle, "install", "--no-ui"], { env, encoding: "utf8" });
+      assert.equal(install.status, 1, install.stdout);
+      assert.match(install.stderr, /server-hosted/);
+      assert.equal(fs.readFileSync(host, "utf8"), original);
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a previously patched server-hosted host is reported as unsupported and can still be restored", () => {
+  const { dir, host, env } = makeEnv();
+  try {
+    assert.equal(run(env, "use", "local", "--url", "https://example.com/v1", "--model", "m1", "--key", "k1", "--no-test").code, 0);
+    fs.appendFileSync(host, RETIRED_BOX_HARNESS);
+    fs.rmSync(path.join(dir, "sup", "command.json"));
+    const before = fs.readFileSync(host, "utf8");
+    const install = run(env, "install", "--no-ui");
+    assert.equal(install.code, 1, install.out);
+    assert.match(install.err, /auxiliary requests.*`official`.*`restore`/);
+    const status = JSON.parse(run(env, "status", "--json").out);
+    assert.equal(status.config.active, "local", "status must not destroy the saved selection");
+    assert.equal(status.config.route, "unsupported", "selection does not mean routing is effective");
+    assert.match(status.config.error, /auxiliary requests/);
+    assert.match(run(env, "list").out, /saved selection: local \(not a verified conversation route\)/);
+    assert.equal(JSON.parse(run(env, "list", "--json").out).route, "unsupported");
+    assert.equal(fs.readFileSync(host, "utf8"), before);
+    assert.equal(fs.existsSync(path.join(dir, "sup", "command.json")), false);
+    assert.equal(run(env, "official").code, 0);
+    assert.equal(run(env, "restore").code, 0);
+    assert.equal(fs.readFileSync(host, "utf8"), FAKE_BUNDLE + RETIRED_BOX_HARNESS);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an error class alone does not disable legacy cloud inference", () => {
+  const { dir, host, env } = makeEnv();
+  try {
+    fs.appendFileSync(host, "\nclass SandBoxHarnessRetiredError extends Error {}\n");
+    const r = run(env, "install", "--no-ui");
+    assert.equal(r.code, 0, r.err);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("unrecognized retirement shapes fail closed instead of claiming supported cloud inference", () => {
+  const { dir, host, env } = makeEnv();
+  try {
+    const variants = [
+      RETIRED_BOX_HARNESS.replaceAll("conversationId", "agentId"),
+      RETIRED_BOX_HARNESS.replace("  refuseBoxTurn(conversationId)", "  anotherMethod() {}\n  refuseBoxTurn(conversationId)"),
+      RETIRED_BOX_HARNESS.replace('entry: "send"', 'entry: { source: "send" }'),
+      RETIRED_BOX_HARNESS.replace("throw new SandBoxHarnessRetiredError();", "this.recordRetirement();\n    throw new SandBoxHarnessRetiredError();")
+    ];
+    for (const retired of variants) {
+      fs.writeFileSync(host, FAKE_BUNDLE + retired);
+      const r = run(env, "use", "p", "--url", "http://127.0.0.1:9/v1", "--model", "m1", "--auth", "none");
+      assert.equal(r.code, 1);
+      assert.match(r.err, /compatibility cannot be verified/);
+      const status = JSON.parse(run(env, "status", "--json").out);
+      assert.equal(status.config.route, "unsupported");
+      assert.equal(status.host.compatibility.kind, "unknown");
+      assert.equal(fs.readFileSync(host, "utf8"), FAKE_BUNDLE + retired);
+      assert.equal(fs.existsSync(path.join(env.GROK_SWITCH_DIR, "config.json")), false);
+      assert.equal(fs.existsSync(path.join(dir, "sup", "command.json")), false);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("host discovery checks the live bundle when both locations exist and refuses ambiguity", () => {
+  const { dir, host, env } = makeEnv();
+  const liveHost = path.join(dir, "current-host.cjs");
+  fs.writeFileSync(liveHost, FAKE_BUNDLE + RETIRED_BOX_HARNESS);
+  const cmdline = path.join(env.GROK_SWITCH_PROC, "4242", "cmdline");
+  fs.writeFileSync(cmdline, "node\0/opt/sand/sand-host/host-main.cjs\0");
+  const preload = path.join(dir, "host-filesystem.cjs");
+  // Redirect only the two canonical bundle paths inside the child. No production
+  // path or discovery override is added just for this test.
+  fs.writeFileSync(preload, `const fs = require('node:fs');
+    const mapped = ${JSON.stringify({ "/home/box/sand-host/host-main.cjs": host, "/opt/sand/sand-host/host-main.cjs": liveHost })};
+    for (const method of ['existsSync', 'readFileSync', 'statSync']) {
+      const original = fs[method];
+      fs[method] = (p, ...args) => original.call(fs, mapped[p] || p, ...args);
+    }
+  `);
+  const discoveryEnv = { ...env, NODE_OPTIONS: `--require=${preload}` };
+  delete discoveryEnv.GROK_SWITCH_HOST;
+  try {
+    let status = JSON.parse(run(discoveryEnv, "status", "--json").out);
+    assert.equal(status.host.path, "/opt/sand/sand-host/host-main.cjs");
+    assert.equal(status.host.process.pid, 4242);
+    assert.equal(status.config.route, "unsupported");
+    let r = run(discoveryEnv, "install", "--no-ui");
+    assert.equal(r.code, 1);
+    assert.match(r.err, /server-hosted model/);
+    assert.equal(fs.readFileSync(host, "utf8"), FAKE_BUNDLE, "stale legacy file must stay untouched");
+    assert.equal(fs.existsSync(host + ".grok-switch.orig"), false);
+    fs.writeFileSync(cmdline, "node\0unrelated.cjs\0");
+    status = JSON.parse(run(discoveryEnv, "status", "--json").out);
+    assert.equal(status.config.route, "unsupported");
+    assert.equal(status.host.compatibility.kind, "unknown");
+    r = run(discoveryEnv, "install", "--no-ui");
+    assert.equal(r.code, 1);
+    assert.match(r.err, /cannot identify a single running host/);
+    assert.equal(fs.readFileSync(host, "utf8"), FAKE_BUNDLE);
+    assert.equal(fs.readFileSync(liveHost, "utf8"), FAKE_BUNDLE + RETIRED_BOX_HARNESS);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("test command sends a real request and log shows it", async () => {
@@ -442,6 +589,69 @@ test("patches the real Grok Bot bundle when it is available locally", { skip: !f
   r = run(env, "restore");
   assert.equal(r.code, 0, r.err);
   assert.ok(fs.readFileSync(host).equals(original), "restore must be byte-exact");
+});
+
+test("refuses the current real server-hosted bundle without modifying the machine", { skip: !RETIRED_REAL_BUNDLE && "retired real bundle not supplied" }, () => {
+  const { dir, host, env } = makeEnv();
+  try {
+    fs.copyFileSync(RETIRED_REAL_BUNDLE, host);
+    const original = fs.readFileSync(host);
+    for (const args of [["install", "--no-ui"], ["use", "p", "--url", "https://api.invalid/v1", "--model", "m", "--key", "synthetic"]]) {
+      const r = run(env, ...args);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.err, /retired cloud main-conversation inference/);
+      assert.ok(fs.readFileSync(host).equals(original));
+      assert.equal(fs.existsSync(host + ".grok-switch.orig"), false);
+      assert.equal(fs.existsSync(path.join(env.GROK_SWITCH_DIR, "config.json")), false);
+      assert.equal(fs.existsSync(path.join(dir, "sup", "command.json")), false);
+    }
+    const s = JSON.parse(run(env, "status", "--json").out);
+    assert.equal(s.config.route, "unsupported");
+    assert.equal(s.host.compatibility.supported, false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ui reports unsupported hosts and rejects activation while retaining independent API tests and recovery", async () => {
+  const { dir, host, env } = makeEnv();
+  fs.appendFileSync(host, RETIRED_BOX_HARNESS);
+  const original = fs.readFileSync(host);
+  let requests = 0;
+  const { server, port } = await startFakeOpenAi(() => { requests++; return { status: 200 }; });
+  try {
+    const r = await runAsync(env, "ui", "--background", "--port", "0");
+    assert.equal(r.code, 0, r.err);
+    const base = /panel running: (http:\/\/127\.0\.0\.1:\d+)\//.exec(r.out)[1];
+    const call = async (endpoint, body) => {
+      const res = await fetch(base + endpoint, { method: body === undefined ? "GET" : "POST", headers: { "x-gs-panel": "1", "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+      return { status: res.status, data: await res.json() };
+    };
+    const state = await call("/api/state");
+    assert.equal(state.data.route, "unsupported");
+    assert.match(state.data.routeError, /server-hosted model/);
+    const saved = await call("/api/providers", { name: "probe", protocol: "openai-chat", baseUrl: `http://127.0.0.1:${port}/v1`, model: "m1", apiKey: "k1" });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.data.probe.ok, true);
+    assert.equal(saved.data.state.route, "unsupported");
+    assert.equal(saved.data.state.active, null);
+    assert.equal(requests, 1);
+    const before = fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "config.json"));
+    const used = await call("/api/use", { name: "probe" });
+    assert.equal(used.status, 400);
+    assert.match(used.data.error, /server-hosted model/);
+    assert.equal(requests, 1, "unsupported use must not issue another paid probe");
+    assert.ok(fs.readFileSync(path.join(env.GROK_SWITCH_DIR, "config.json")).equals(before));
+    assert.ok(fs.readFileSync(host).equals(original));
+    assert.equal(fs.existsSync(host + ".grok-switch.orig"), false);
+    assert.equal(fs.existsSync(path.join(dir, "sup", "command.json")), false);
+    assert.equal((await call("/api/official", {})).status, 200);
+    assert.equal((await call("/api/providers/delete", { name: "probe" })).status, 200);
+  } finally {
+    await runAsync(env, "ui", "stop");
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 

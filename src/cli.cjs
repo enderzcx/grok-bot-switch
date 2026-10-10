@@ -7,11 +7,12 @@ var cliPath = require("node:path");
 var cliChildProcess = require("node:child_process");
 
 var CLI_VERSION = "__GROK_SWITCH_VERSION__";
-var CLI_HOST_PATH = process.env.GROK_SWITCH_HOST || "/home/box/sand-host/host-main.cjs";
+var CLI_PROC_ROOT = process.env.GROK_SWITCH_PROC || "/proc";
+var CLI_HOST_DISCOVERY_ERROR = null;
+var CLI_HOST_PATH = cliDiscoverHostPath();
 var CLI_HOST_VERSION_PATH = cliPath.join(cliPath.dirname(CLI_HOST_PATH), "version");
 var CLI_BACKUP_PATH = CLI_HOST_PATH + ".grok-switch.orig";
 var CLI_SUPERVISOR_DIR = process.env.GROK_SWITCH_SUPERVISOR_DIR || "/tmp/sand-supervisor";
-var CLI_PROC_ROOT = process.env.GROK_SWITCH_PROC || "/proc";
 var CLI_CONFIG_DIR = GROK_SWITCH_DIR;
 var CLI_CONFIG_PATH = GROK_SWITCH_CONFIG_PATH;
 var CLI_LOG_PATH = GROK_SWITCH_LOG_PATH;
@@ -56,13 +57,33 @@ var CLI_USAGE = [
   "  --max-tokens <n>                maxTokens parameter (Anthropic default 8192)",
   "  --no-test                       skip the test request `use` sends before switching",
   "",
-  "in chat (any platform, no terminal): /gs use <name>   /gs official   /gs status",
+  "in chat (compatible cloud-inference hosts only): /gs use <name>   /gs official   /gs status",
+  "install/use refuse retired or uncertain cloud conversation paths; independent API tests may cost money.",
   "",
   "files: " + CLI_CONFIG_PATH + " (config, mode 600), " + CLI_LOG_PATH + " (request log)",
   "host:  " + CLI_HOST_PATH
 ].join("\n");
 
 class CliError extends Error {}
+
+function cliDiscoverHostPath() {
+  if (process.env.GROK_SWITCH_HOST) return process.env.GROK_SWITCH_HOST;
+  var paths = ["/home/box/sand-host/host-main.cjs", "/opt/sand/sand-host/host-main.cjs"];
+  var existing = paths.filter(function (path) { return cliFs.existsSync(path); });
+  if (existing.length <= 1) return existing[0] || paths[0];
+  var live = new Set();
+  try {
+    cliFs.readdirSync(CLI_PROC_ROOT).filter(function (pid) { return /^\d+$/.test(pid); }).forEach(function (pid) {
+      try {
+        var args = cliFs.readFileSync(cliPath.join(CLI_PROC_ROOT, pid, "cmdline"), "utf8").split("\0");
+        existing.forEach(function (path) { if (args.indexOf(path) !== -1) live.add(path); });
+      } catch (_error) {}
+    });
+  } catch (_error) {}
+  if (live.size === 1) return Array.from(live)[0];
+  CLI_HOST_DISCOVERY_ERROR = "Multiple Grok Bot host bundles found; cannot identify a single running host. Set GROK_SWITCH_HOST to the live host path before installing or switching.";
+  return existing[0];
+}
 
 function cliParseArgs(argv) {
   var positional = [];
@@ -255,7 +276,32 @@ function cliInspectBundle(text) {
   return { stock: stock, patched: true, version: version };
 }
 
-function cliAssertPatchable(stock) {
+function cliHostCompatibility(stock, patched) {
+  // The current server-hosted bundle retains the inference factory for auxiliary
+  // work. Reject its unconditional retirement of local turns, not the error class
+  // alone: older bundles may contain that class and still execute local turns.
+  var delegatesAllTurns = /this\.refuseBoxTurn\(\s*gatedAgentId\s*\?\?\s*["']unknown["']\s*\);\s*}\s*refuseBoxTurn\(/.test(stock);
+  var refusesAllTurns = /refuseBoxTurn\(\s*conversationId\s*\)\s*{\s*this\.tm\.boxHarnessRefusals\.reportBlocked\(\s*{[^}]*}\s*\);\s*throw\s+new\s+SandBoxHarnessRetiredError\(\s*\);\s*}/.test(stock);
+  var reason = null;
+  var kind = "cloud-inference";
+  if (delegatesAllTurns && refusesAllTurns) {
+    kind = "server-hosted";
+    reason = "This Grok Bot host has retired cloud main-conversation inference. Switch cannot change its server-hosted model.";
+  } else if (/throw\s+new\s+SandBoxHarnessRetiredError\s*\(/.test(stock)) {
+    // Unknown retirement shapes must not fall back to a positive capability claim.
+    kind = "unknown";
+    reason = "This host contains retired cloud conversation paths; compatibility cannot be verified. Refusing to probe, patch or switch.";
+  }
+  if (reason != null) {
+    if (patched) reason += " An existing Switch patch may still route auxiliary requests to the saved provider. Run `official` to stop external routing and `restore` to remove the patch.";
+    return { kind: kind, supported: false, reason: reason };
+  }
+  return { kind: "cloud-inference", supported: true, reason: null };
+}
+
+function cliAssertPatchable(stock, patched) {
+  var compatibility = cliHostCompatibility(stock, patched);
+  if (!compatibility.supported) throw new CliError(compatibility.reason);
   var factories = cliCount(stock, CLI_HOST_FACTORY);
   if (factories !== 1) {
     throw new CliError("host bundle has " + factories + " createHostInference definitions (expected 1); this Grok Bot version is not supported yet");
@@ -300,6 +346,7 @@ function cliWriteBundle(text) {
 }
 
 function cliReadBundle() {
+  if (CLI_HOST_DISCOVERY_ERROR) throw new CliError(CLI_HOST_DISCOVERY_ERROR);
   try {
     return cliFs.readFileSync(CLI_HOST_PATH, "utf8");
   } catch (error) {
@@ -313,8 +360,8 @@ function cliReadBundle() {
 function cliEnsurePatched() {
   var text = cliReadBundle();
   var info = cliInspectBundle(text);
+  cliAssertPatchable(info.stock, info.patched);
   if (info.patched && info.version === CLI_VERSION) return "unchanged";
-  cliAssertPatchable(info.stock);
   if (!info.patched) cliFs.writeFileSync(CLI_BACKUP_PATH, info.stock, { mode: 384 });
   cliWriteBundle(cliBuildPatched(info.stock));
   return info.patched ? "updated" : "patched";
@@ -431,8 +478,16 @@ function cliHostState() {
     backupExists: cliFs.existsSync(CLI_BACKUP_PATH),
     process: proc,
     runningCurrentBundle: runningCurrent,
+    compatibility: CLI_HOST_DISCOVERY_ERROR ? { kind: "unknown", supported: false, reason: CLI_HOST_DISCOVERY_ERROR } : info == null ? null : cliHostCompatibility(info.stock, info.patched),
     supervisor: cliSupervisorState()
   };
+}
+
+function cliReportedRoute(route, host) {
+  if (host.compatibility && !host.compatibility.supported) {
+    return { kind: "unsupported", message: host.compatibility.reason };
+  }
+  return route;
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +538,7 @@ function cliCommandRemove(args) {
 
 function cliCommandList(args) {
   var config = cliReadRawConfig();
+  var route = cliReportedRoute(grokSwitchResolveRoute(), cliHostState());
   var names = Object.keys(config.providers);
   if (args.flags.json) {
     var out = {};
@@ -491,11 +547,12 @@ function cliCommandList(args) {
       if (copy.apiKey != null) copy.apiKey = "***";
       out[names[i]] = copy;
     }
-    cliPrint(JSON.stringify({ active: config.active, providers: out }, null, 2));
+    cliPrint(JSON.stringify({ active: config.active, route: route.kind, error: route.kind === "unsupported" ? route.message : null, providers: out }, null, 2));
     return;
   }
   if (names.length === 0) {
-    cliPrint("no providers saved; add one with: use <name> --url <baseUrl> --model <id> --key <apiKey>");
+    if (route.kind === "unsupported") cliPrint("UNSUPPORTED: " + route.message);
+    cliPrint("no providers saved; add one with: add <name> --url <baseUrl> --model <id> --key <apiKey>");
     return;
   }
   for (var j = 0; j < names.length; j += 1) {
@@ -508,7 +565,10 @@ function cliCommandList(args) {
     }
     cliPrint(marker + names[j] + "  " + summary);
   }
-  cliPrint(config.active == null ? "active: official Grok" : "active: " + config.active);
+  if (route.kind === "unsupported") {
+    cliPrint("saved selection: " + (config.active || "official Grok") + " (not a verified conversation route)");
+    cliPrint("UNSUPPORTED: " + route.message);
+  } else cliPrint(config.active == null ? "active: official Grok" : "active: " + config.active);
 }
 
 function cliExplainRestart(result) {
@@ -535,6 +595,9 @@ async function cliCommandUse(args) {
   } catch (error) {
     throw new CliError(error.message);
   }
+  // Check the conversation path before spending on a probe or saving a key.
+  var hostInfo = cliInspectBundle(cliReadBundle());
+  cliAssertPatchable(hostInfo.stock, hostInfo.patched);
   // A new or edited provider is probed before anything is switched, so a bad
   // URL, key or model is reported here instead of in the next conversation.
   if (changed && !args.flags["no-test"]) {
@@ -646,7 +709,7 @@ function cliCommandLog(args) {
 function cliCommandStatus(args) {
   var host = cliHostState();
   var config = cliReadRawConfig();
-  var route = grokSwitchResolveRoute();
+  var route = cliReportedRoute(grokSwitchResolveRoute(), host);
   var recent = cliReadLog(5);
   var usage = cliUsageTotals();
   if (args.flags.json) {
@@ -654,7 +717,7 @@ function cliCommandStatus(args) {
     cliPrint(JSON.stringify({
       version: CLI_VERSION,
       host: host,
-      config: { path: CLI_CONFIG_PATH, active: config.active, providers: Object.keys(config.providers), route: route.kind, error: route.kind === "error" ? route.message : null, activeProvider: activeProvider },
+      config: { path: CLI_CONFIG_PATH, active: config.active, providers: Object.keys(config.providers), route: route.kind, error: route.kind === "error" || route.kind === "unsupported" ? route.message : null, activeProvider: activeProvider },
       usage: usage,
       recentRequests: recent
     }, null, 2));
@@ -677,6 +740,7 @@ function cliCommandStatus(args) {
   cliPrint("supervisor  : " + (sup.busy ? "agent busy" : "idle") + (sup.pending ? ", command pending (" + String(sup.pending.id) + ")" : ""));
   if (route.kind === "official") cliPrint("active      : official Grok");
   else if (route.kind === "external") cliPrint("active      : " + route.provider.name + " -> " + cliDescribeProvider(route.provider));
+  else if (route.kind === "unsupported") cliPrint("active      : UNSUPPORTED - " + route.message);
   else cliPrint("active      : MISCONFIGURED - " + route.message + " (requests fail until fixed; run `official` to recover)");
   var names = Object.keys(config.providers);
   cliPrint("providers   : " + (names.length ? names.join(", ") : "none"));
