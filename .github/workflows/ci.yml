@@ -19,7 +19,7 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm test
       - name: dist/grok-switch.cjs must be committed up to date
-        run: git diff --exit-code -- dist/grok-switch.cjs
+        run: git diff --exit-code -- dist/grok-switch.cjs dist/grok-switch-core.cjs
   panel:
     runs-on: ubuntu-latest
     timeout-minutes: 15

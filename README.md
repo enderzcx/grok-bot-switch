@@ -77,7 +77,7 @@ Grok Bot 的推理请求不是从你的 Mac/Windows 发出的，而是从它的�
 
 ## 边界与注意
 
-- v0.8.5 保留工具的 `strict` 设置，Responses 默认使用 `strict: false`，保持可选参数语义。Shell、Read、AwaitShell 的 `machineId` 若为空或不是字符串，会明确报错并阻止该调用，不会自动改投另一台电脑。云端执行应省略 `machineId`；本机执行应填写已注册的机器 ID。此修复尚未通过真实 ChatGPT OAuth 故障账号验收，不代表所有 OAuth 兼容问题已解决。
+- v0.8.6 保留工具的 `strict` 设置，Responses 默认使用 `strict: false`，保持可选参数语义。Shell、Read、AwaitShell 的 `machineId` 为 null 或空字符串时会省略该字段；非字符串会明确报错并阻止调用。有效机器 ID 保持原样。版本升级会重新安装注入段并请求重启。此修复尚未通过真实 ChatGPT OAuth 故障账号验收，不代表所有 OAuth 兼容问题已解决。
 
 - 给用外部模型的 Bot 建议关掉"本机执行"：外部模型往往不会指定目标机器，主程序会把命令默认路由到你自己的电脑上。
 - ChatGPT 登录目前是实验性功能，云端实测还少；不工作请反馈。
@@ -97,6 +97,6 @@ npm test        # 构建 dist/grok-switch.cjs 并运行全部测试（无第三�
 
 `minitool/` 是挂在小红书"小工具"里的离线使用向导（纯静态 H5：安装提示词生成器、切换命令、ChatGPT 登录说明、常见问题），`npm run build:minitool` 打成 `dist/grok-switch-minitool.zip` 直接上传；它不联网、不调用剪贴板，按小红书小工具容器规范编写（脚本外置、ES2017、Chrome 61 CSS 基线）。
 
-`src/protocols/` 是三种协议的转换器，`src/runtime.cjs` 是注入主程序的路由、聊天命令和流式代码，`src/ui.cjs` 是面板（服务端 + 内嵌页面），`src/cli.cjs` 是命令行；`build.mjs` 把它们拼成 `dist/grok-switch.cjs`。测试把构建产物的注入段加载到模拟的主程序作用域里运行，并对一个合成主程序（本地有真实主程序时也会对它）执行打补丁、测试请求、面板 API、重启请求、恢复的完整流程。
+`src/protocols/` 是三种协议的转换器，`src/runtime.cjs` 是注入主程序的路由、聊天命令和流式代码，`src/ui.cjs` 是面板（服务端 + 内嵌页面），`src/cli.cjs` 是命令行。`build.mjs` 同时构建含面板的 `dist/grok-switch.cjs` 和适合云端提示词安装的 `dist/grok-switch-core.cjs`；两者共享协议、配置、补丁和恢复逻辑。测试对构建产物验证安装、升级、请求和恢复流程。
 
 MIT License。

@@ -443,3 +443,26 @@ test("patches the real Grok Bot bundle when it is available locally", { skip: !f
   assert.equal(r.code, 0, r.err);
   assert.ok(fs.readFileSync(host).equals(original), "restore must be byte-exact");
 });
+
+
+test("0.8.5 installations are upgraded and the core bundle restores byte-exactly", () => {
+  const { dir, host, env } = makeEnv();
+  try {
+    const core = path.join(root, "dist", "grok-switch-core.cjs");
+    const coreRun = (...args) => spawnSync(process.execPath, [core, ...args], { env, encoding: "utf8" });
+    let r = coreRun("use", "test", "--url", "https://api.example/v1", "--model", "gpt-5", "--key", "synthetic", "--no-test");
+    assert.equal(r.status, 0, r.stderr);
+    const patched = fs.readFileSync(host, "utf8");
+    const old = patched.replaceAll(PKG_VERSION, "0.8.5").replace("// GROK_SWITCH_BEGIN", "// GROK_SWITCH_BEGIN\n// obsolete-payload");
+    fs.writeFileSync(host, old);
+    fs.rmSync(path.join(dir, "sup", "command.json"));
+    r = coreRun("install");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /restart requested/);
+    assert.ok(!fs.readFileSync(host, "utf8").includes("obsolete-payload"));
+    assert.ok(!fs.readFileSync(core, "utf8").includes("function uiCommand"), "core includes panel runtime");
+    r = coreRun("restore");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(fs.readFileSync(host, "utf8"), FAKE_BUNDLE);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
