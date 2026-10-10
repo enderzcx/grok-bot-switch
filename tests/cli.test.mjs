@@ -453,7 +453,7 @@ test("0.8.5 installations are upgraded and the core bundle restores byte-exactly
     let r = coreRun("use", "test", "--url", "https://api.example/v1", "--model", "gpt-5", "--key", "synthetic", "--no-test");
     assert.equal(r.status, 0, r.stderr);
     const patched = fs.readFileSync(host, "utf8");
-    const old = patched.replaceAll(PKG_VERSION, "0.8.5").replace("// GROK_SWITCH_BEGIN", "// GROK_SWITCH_BEGIN\n// obsolete-payload");
+    const old = patched.replaceAll(PKG_VERSION, "0.8.5").replace(/(\/\/ GROK_SWITCH_BEGIN[^\n]*\n)/, "$1// obsolete-payload\n");
     fs.writeFileSync(host, old);
     fs.rmSync(path.join(dir, "sup", "command.json"));
     r = coreRun("install");
